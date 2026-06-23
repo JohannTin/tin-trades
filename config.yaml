@@ -1,0 +1,15 @@
+watchlist:
+  - SPY
+  - QQQ
+  - IWM
+
+prepost: true
+
+options:
+  strikes_n: 2       # strikes each side of ATM for 1m candles
+  chain_expiries: 2  # 0DTE + friday
+
+earnings:
+  oi_min:  5000
+  cap_min: 10000000000
+  est_min: 4
