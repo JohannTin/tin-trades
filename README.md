@@ -10,9 +10,9 @@ Data collection pipeline for SPY, QQQ, IWM. Earnings calendar, macro events, 1m 
 |--------|------|------|
 | `earnings.py` | Sunday | Weekly earnings calendar filtered by OI / market cap |
 | `events.py` | Sunday | Weekly macro events — high-impact USD only (ForexFactory) |
-| `market_data.py` | Daily, market close | 1m OHLCV candles for watchlist |
-| `options_data.py` | Daily, 9:00 AM | Full chain snapshot — OI, IV, volume |
-| `options_data.py --quotes` | Daily, 9:35 AM | Patch bid/ask after open |
+| `market_data.py` | Daily, 4:30 PM ET | 1m OHLCV candles for watchlist |
+| `options_data.py` | Daily, 9:00 AM ET | Full chain snapshot — OI, IV, volume |
+| `options_data.py --quotes` | Daily, 9:35 AM ET | Patch bid/ask after open |
 | `bot.py` | Always on | Telegram bot — `/earnings`, `/events` commands |
 
 ---
@@ -96,7 +96,9 @@ Run: `set -a && source .env && set +a && .venv/bin/python bot.py`
 | Plist | Schedule | What |
 |-------|----------|------|
 | `com.tintrades.bot` | Always on (KeepAlive) | Telegram bot |
-| `com.tintrades.weekly` | Sunday 8:00 AM | Runs `run_weekly.sh` — fetches earnings + events for next week |
+| `com.tintrades.weekly` | Sunday 8:00 AM PT | Runs `run_weekly.sh` — fetches earnings + events for next week |
+| `com.tintrades.optionsdata` | 6:00 AM + 6:35 AM PT (9:00 + 9:35 AM ET) | Options chain snapshot + bid/ask patch |
+| `com.tintrades.marketdata` | 1:30 PM PT (4:30 PM ET) | 1m OHLCV candles |
 
 ```bash
 # load / unload
