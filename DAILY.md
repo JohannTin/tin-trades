@@ -1,15 +1,16 @@
-# Daily Overview — 2026-06-23
+# Daily Overview — 2026-06-24
 
 ## Earnings Today
 
 | Symbol | Name | Time | EPS Est | Cap |
 |--------|------|------|---------|-----|
-| CCL | Carnival Corporation Ltd. | pre | $0.34 | 44.1B |
-| CBRS | Cerebras Systems Inc. | aft | ($0.14) | 50.5B |
-| AVXL | Anavex Life Sciences Corp. |  -  | ($0.07) | 253M |
-| KBH | KB Home | aft | $0.44 | 3.4B |
-| ICLR | ICON plc | aft | $2.18 | 11.2B |
-| FDX | FedEx Corporation | aft | $5.91 | 77.8B |
+| MU | Micron Technology, Inc. | aft | $20.81 | 1.3T |
+| JEF | Jefferies Financial Group In | aft | $1.09 | 12.7B |
+| RR | Richtech Robotics Inc. |  -  | ($0.03) | 478M |
+| TCOM | Trip.com Group Limited | aft | $0.74 | 28.4B |
+| PAYX | Paychex, Inc. | pre | $1.31 | 35.2B |
+| MEI | Methode Electronics, Inc. | aft | ($0.11) | 497M |
+| DAKT | Daktronics, Inc. | pre | $0.22 | 1.0B |
 
 ## Macro Events
 
