@@ -1,6 +1,6 @@
 # tin-trades
 
-Data collection pipeline for SPY, QQQ, IWM. Earnings calendar, macro events, 1m candles, and options chain snapshots — built for backtesting and daily market prep.
+Data collection pipeline for SPY, QQQ, IWM, and VIX. Earnings calendar, macro events, 1m candles, options chain snapshots, and gamma exposure — built for backtesting and daily market prep.
 
 ---
 
@@ -10,10 +10,11 @@ Data collection pipeline for SPY, QQQ, IWM. Earnings calendar, macro events, 1m 
 |--------|------|------|
 | `earnings.py` | Sunday | Weekly earnings calendar filtered by OI / market cap |
 | `events.py` | Sunday | Weekly macro events — high-impact USD only (ForexFactory) |
-| `market_data.py` | Daily, 4:30 PM ET | 1m OHLCV candles for watchlist |
+| `market_data.py` | Daily, 4:30 PM ET | 1m OHLCV candles for watchlist + VIX |
 | `options_data.py` | Daily, 9:00 AM ET | Full chain snapshot — OI, IV, volume |
 | `options_data.py --quotes` | Daily, 9:35 AM ET | Patch bid/ask after open |
-| `bot.py` | Always on | Telegram bot — `/earnings`, `/events` commands |
+| `gamma_exposure.py` | Daily, 9:05 AM ET | GEX snapshot for all watchlist tickers via IBKR TWS |
+| `bot.py` | Always on | Telegram bot — `/earnings`, `/events`, `/gamma` commands |
 
 ---
 
@@ -21,10 +22,12 @@ Data collection pipeline for SPY, QQQ, IWM. Earnings calendar, macro events, 1m 
 
 ```
 data/
-  earnings.db                          SQLite — weekly earnings calendar
-  events.db                            SQLite — weekly macro events
-  candles/{ticker}_{year}.parquet      1m OHLCV per ticker per year
-  options/{ticker}_chain_{year}.parquet  daily chain snapshot (OI, IV, bid/ask)
+  earnings.db                              SQLite — weekly earnings calendar
+  events.db                                SQLite — weekly macro events
+  candles/{ticker}_{year}.parquet          1m OHLCV per ticker per year (SPY, QQQ, IWM, ^VIX)
+  options/{ticker}_chain_{year}.parquet    daily chain snapshot (OI, IV, bid/ask)
+  gamma/{ticker}_gex_{year}.parquet        daily GEX detail per ticker
+  gamma/{ticker}_summary.json             latest GEX summary per ticker
 ```
 
 **Chain columns:** `date, expiry, strike, call_oi, call_iv, call_bid, call_ask, call_volume, put_oi, put_iv, put_bid, put_ask, put_volume`
@@ -38,24 +41,33 @@ python3 -m venv .venv
 .venv/bin/pip install -r requirements.txt
 ```
 
-Copy `.env.example` to `.env` and fill in `TELEGRAM_TOKEN` and `TELEGRAM_CHAT_ID` to enable the bot and Telegram notifications.
+Copy `.env.example` to `.env` and fill in `TELEGRAM_TOKEN` and `TELEGRAM_CHAT_ID`.
 
 ---
 
 ## Config (`config.yaml`)
 
 ```yaml
-watchlist: [SPY, QQQ, IWM]
-prepost: true          # include pre/post market candles
+watchlist: [SPY, QQQ, IWM]   # options chains + GEX
+price_only: [^VIX]            # 1m candles only, no options
+
+prepost: true
+
+ibkr:
+  host: 127.0.0.1
+  port: 7497
+  client_id: 10
+  readonly: true
+  gex_strikes_pct: 0.08       # strikes within ±8% of spot
 
 options:
-  strikes_n: 2         # strikes each side of ATM for 1m candles
-  chain_expiries: 2    # 0DTE + friday
+  strikes_n: 2
+  chain_expiries: 2
 
 earnings:
-  oi_min:  5000        # minimum total options OI
-  cap_min: 10000000000 # minimum market cap ($10B)
-  est_min: 4           # minimum analyst estimates
+  oi_min:  5000
+  cap_min: 10000000000
+  est_min: 4
 ```
 
 ---
@@ -80,6 +92,11 @@ earnings:
 ## Telegram bot
 
 ```
+/gamma             SPY gamma exposure (from daily snapshot)
+/gamma QQQ         QQQ gamma (snapshot if available, else live)
+/gamma NVDA        live GEX for any ticker
+/alert TICKER      alert when wall breaks or +GEX zone hit
+/alert off         clear all alerts
 /earnings          this week
 /earnings today    today only
 /earnings next     next week
@@ -96,20 +113,14 @@ Run: `set -a && source .env && set +a && .venv/bin/python bot.py`
 | Plist | Schedule | What |
 |-------|----------|------|
 | `com.tintrades.bot` | Always on (KeepAlive) | Telegram bot |
-| `com.tintrades.weekly` | Sunday 8:00 AM PT | Runs `run_weekly.sh` — fetches earnings + events for next week |
-| `com.tintrades.optionsdata` | 6:00 AM + 6:35 AM PT (9:00 + 9:35 AM ET) | Options chain snapshot + bid/ask patch |
+| `com.tintrades.weekly` | Sunday 8:00 AM PT | Runs `run_weekly.sh` — fetches earnings + events |
+| `com.tintrades.optionsdata` | 6:00 AM + 6:35 AM PT | Options chain snapshot + bid/ask patch |
+| `com.tintrades.gamma` | 6:05 AM PT (9:05 AM ET) | GEX snapshot for SPY, QQQ, IWM |
 | `com.tintrades.marketdata` | 1:30 PM PT (4:30 PM ET) | 1m OHLCV candles |
 
 ```bash
-# load / unload
 launchctl load ~/Library/LaunchAgents/com.tintrades.weekly.plist
-launchctl unload ~/Library/LaunchAgents/com.tintrades.weekly.plist
-
-# run weekly fetch manually
-./run_weekly.sh
-
-# check status
 launchctl list | grep tintrades
 ```
 
-Logs: `logs/weekly.log`, `logs/bot.log`
+Logs: `logs/tin_trades.log`, `logs/bot.log`, `logs/gamma.log`, `logs/options.log`

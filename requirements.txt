@@ -5,3 +5,4 @@ pandas-market-calendars
 pyyaml
 requests
 pyarrow
+ib_insync

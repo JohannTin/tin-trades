@@ -11,9 +11,17 @@ Commands:
 
 Run: set -a && source .env && set +a && .venv/bin/python bot.py
 """
-import os, sqlite3, time, requests
-from datetime import date, timedelta
+import json, math, os, sqlite3, threading, time, warnings, requests
+from datetime import date, timedelta, datetime
+from pathlib import Path
+from zoneinfo import ZoneInfo
 from utils import setup_logger
+
+ET = ZoneInfo('America/New_York')
+
+warnings.filterwarnings('ignore')
+
+_alerts = {}  # ticker -> {chat_id, wall, first_pos}
 
 TOKEN   = os.environ['TELEGRAM_TOKEN']
 BASE    = f'https://api.telegram.org/bot{TOKEN}'
@@ -76,6 +84,157 @@ def earnings_text(filter_date=None, next_week=False):
     return '\n'.join(lines)
 
 
+def _bs_gamma(S, K, T, sigma, r=0.05):
+    if T <= 0 or sigma <= 0 or S <= 0 or K <= 0:
+        return 0.0
+    d1 = (math.log(S / K) + (r + 0.5 * sigma**2) * T) / (sigma * math.sqrt(T))
+    return math.exp(-0.5 * d1**2) / (math.sqrt(2 * math.pi) * S * sigma * math.sqrt(T))
+
+
+def gex_live(ticker):
+    try:
+        import yfinance as yf
+        import pandas as pd
+    except ImportError:
+        return 'yfinance/pandas not installed.'
+
+    tk   = yf.Ticker(ticker.upper())
+    spot = tk.fast_info.get('lastPrice') or tk.fast_info.get('previousClose')
+    if not spot:
+        return f'Could not get spot price for {ticker.upper()}.'
+
+    exp  = tk.options[0]
+    T    = max((date.fromisoformat(exp) - date.today()).days / 365, 1 / 365)
+
+    chain = tk.option_chain(exp)
+    rows  = []
+    for sign, df in [(1, chain.calls), (-1, chain.puts)]:
+        for _, r in df.iterrows():
+            iv  = r.get('impliedVolatility', 0) or 0
+            oi  = r.get('openInterest', 0) or 0
+            g   = _bs_gamma(spot, r['strike'], T, iv)
+            rows.append({'strike': r['strike'], 'gex': sign * oi * g * 100 * spot})
+
+    agg = (pd.DataFrame(rows).groupby('strike')['gex'].sum()
+             .reset_index().sort_values('strike'))
+    agg['cum_gex'] = agg['gex'].cumsum()
+
+    total = agg['gex'].sum()
+    wall  = float(agg.loc[agg['gex'].abs().idxmax(), 'strike'])
+
+    shifted   = agg['cum_gex'].shift(1, fill_value=agg['cum_gex'].iloc[0])
+    flip_rows = agg[shifted * agg['cum_gex'] < 0]
+    flip      = float(flip_rows['strike'].iloc[0]) if not flip_rows.empty else None
+
+    pos_above  = agg[(agg['gex'] > 0) & (agg['strike'] > spot)]
+    first_pos  = float(pos_above['strike'].min()) if not pos_above.empty else None
+    call_wall  = float(pos_above.loc[pos_above['gex'].idxmax(), 'strike']) if not pos_above.empty else None
+
+    sign_str  = 'neg (AMP)' if total < 0 else 'pos (PIN)'
+    flip_str  = f'{flip:.2f}' if flip else 'none in range'
+    first_str = f'{first_pos:.2f}' if first_pos else 'none'
+    cwall_str = f'{call_wall:.2f}' if call_wall else 'none'
+
+    return (
+        f'GAMMA  {ticker.upper()}  {exp}\n'
+        f'Spot   {spot:.2f}\n'
+        f'Wall   {wall:.2f}\n'
+        f'Flip   {flip_str}\n'
+        f'+GEX   {first_str}  →  {cwall_str}\n'
+        f'Total  {total/1e6:+.1f}M  {sign_str}'
+    )
+
+
+def alert_set(ticker, chat_id):
+    import yfinance as yf
+    import pandas as pd
+
+    ticker = ticker.upper()
+    tk     = yf.Ticker(ticker)
+    spot   = tk.fast_info.get('lastPrice') or tk.fast_info.get('previousClose')
+    if not spot:
+        return f'Could not get spot for {ticker}.'
+
+    exp = tk.options[0]
+    T   = max((date.fromisoformat(exp) - date.today()).days / 365, 1 / 365)
+
+    rows = []
+    chain = tk.option_chain(exp)
+    for sign, df in [(1, chain.calls), (-1, chain.puts)]:
+        for _, r in df.iterrows():
+            iv = r.get('impliedVolatility', 0) or 0
+            oi = r.get('openInterest', 0) or 0
+            g  = _bs_gamma(spot, r['strike'], T, iv)
+            rows.append({'strike': r['strike'], 'gex': sign * oi * g * 100 * spot})
+
+    agg      = pd.DataFrame(rows).groupby('strike')['gex'].sum().reset_index().sort_values('strike')
+    wall     = float(agg.loc[agg['gex'].abs().idxmax(), 'strike'])
+    pos_above = agg[(agg['gex'] > 0) & (agg['strike'] > spot)]
+    first_pos = float(pos_above['strike'].min()) if not pos_above.empty else None
+
+    _alerts[ticker] = {'chat_id': chat_id, 'wall': wall, 'first_pos': first_pos}
+    log.info(f'alert set: {ticker} wall={wall} first_pos={first_pos} chat={chat_id}')
+
+    pos_str = f'{first_pos:.2f}' if first_pos else 'none'
+    return (f'Alert set for {ticker}\n'
+            f'Spot      {spot:.2f}\n'
+            f'Wall      {wall:.2f}  ← fires if spot < this\n'
+            f'+GEX zone {pos_str}  ← fires if spot >= this\n'
+            f'Clears at 4:00 PM ET')
+
+
+def alert_thread():
+    import yfinance as yf
+
+    while True:
+        time.sleep(300)
+        now = datetime.now(ET)
+
+        if now.hour >= 16:
+            if _alerts:
+                for ticker, a in list(_alerts.items()):
+                    send(a['chat_id'], f'Market closed. Alert cleared for {ticker}.')
+                _alerts.clear()
+                log.info('alerts cleared at EOD')
+            continue
+
+        for ticker, a in list(_alerts.items()):
+            try:
+                spot = yf.Ticker(ticker).fast_info.get('lastPrice')
+                if not spot:
+                    continue
+                if spot < a['wall']:
+                    msg = f'ALERT  {ticker}\nBroke below wall {a["wall"]:.2f}\nSpot {spot:.2f}'
+                    send(a['chat_id'], msg)
+                    log.info(f'alert fired (wall break): {ticker} spot={spot}')
+                    del _alerts[ticker]
+                elif a['first_pos'] and spot >= a['first_pos']:
+                    msg = f'ALERT  {ticker}\nEntered +GEX zone {a["first_pos"]:.2f}\nSpot {spot:.2f}'
+                    send(a['chat_id'], msg)
+                    log.info(f'alert fired (+GEX): {ticker} spot={spot}')
+                    del _alerts[ticker]
+            except Exception as e:
+                log.error(f'alert check error {ticker}: {e}')
+
+
+def gamma_text(ticker='SPY'):
+    p = Path(f'data/gamma/{ticker}_summary.json')
+    if not p.exists():
+        return f'No GEX data for {ticker} yet. Runs at 9:05 AM ET.'
+    s = json.loads(p.read_text())
+    if s['date'] != date.today().isoformat():
+        return f"GEX data is from {s['date']}, not today."
+    sign     = 'neg (vol AMP)' if s['total_gex'] < 0 else 'pos (vol PIN)'
+    flip_str = f"{s['flip']:.2f}" if s['flip'] else 'N/A'
+    return (
+        f"GAMMA  {ticker}  {s['date']}\n"
+        f"Spot  {s['spot']:.2f}\n"
+        f"Flip  {flip_str}\n"
+        f"Wall  {s['wall']:.2f}\n"
+        f"GEX   {s['total_gex']:+.2f}B  {sign}"
+    )
+
+
 def events_text(next_week=False):
     url = ('https://nfs.faireconomy.media/ff_calendar_nextweek.json' if next_week
            else 'https://nfs.faireconomy.media/ff_calendar_thisweek.json')
@@ -119,7 +278,20 @@ def handle(msg):
     cmd     = parts[0].lstrip('/').split('@')[0] if parts else ''
     args    = parts[1:]
 
-    if cmd == 'earnings':
+    if cmd == 'gamma':
+        if not args:
+            reply = gamma_text()
+        elif Path(f'data/gamma/{args[0].upper()}_summary.json').exists():
+            reply = gamma_text(args[0].upper())
+        else:
+            reply = gex_live(args[0])
+    elif cmd == 'alert':
+        if not args or args[0] == 'off':
+            _alerts.clear()
+            reply = 'All alerts cleared.'
+        else:
+            reply = alert_set(args[0], chat_id)
+    elif cmd == 'earnings':
         if 'today' in args:
             reply = earnings_text(filter_date=date.today())
         elif 'next' in args:
@@ -129,7 +301,11 @@ def handle(msg):
     elif cmd == 'events':
         reply = events_text(next_week='next' in args)
     elif cmd == 'help' or cmd == 'start':
-        reply = ('/earnings         — this week\n'
+        reply = ('/gamma            — SPY gamma exposure\n'
+                 '/gamma TICKER     — live GEX for any ticker\n'
+                 '/alert TICKER     — alert when wall breaks or +GEX hit\n'
+                 '/alert off        — clear all alerts\n'
+                 '/earnings         — this week\n'
                  '/earnings today   — today only\n'
                  '/earnings next    — next week\n'
                  '/events           — this week\n'
@@ -142,6 +318,7 @@ def handle(msg):
 
 
 def poll():
+    threading.Thread(target=alert_thread, daemon=True).start()
     offset = 0
     log.info('Bot started.')
     while True:
