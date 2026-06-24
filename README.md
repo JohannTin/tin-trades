@@ -4,7 +4,8 @@ Data collection pipeline for SPY, QQQ, IWM, and VIX. Earnings calendar, macro ev
 
 ---
 
-## Scripts
+<details>
+<summary><strong>Scripts</strong></summary>
 
 | Script | When | What |
 |--------|------|------|
@@ -16,9 +17,12 @@ Data collection pipeline for SPY, QQQ, IWM, and VIX. Earnings calendar, macro ev
 | `gamma_exposure.py` | Daily, 9:05 AM ET | GEX snapshot for all watchlist tickers via IBKR TWS |
 | `bot.py` | Always on | Telegram bot — `/earnings`, `/events`, `/gamma` commands |
 
+</details>
+
 ---
 
-## Data
+<details>
+<summary><strong>Data</strong></summary>
 
 ```
 data/
@@ -32,9 +36,12 @@ data/
 
 **Chain columns:** `date, expiry, strike, call_oi, call_iv, call_bid, call_ask, call_volume, put_oi, put_iv, put_bid, put_ask, put_volume`
 
+</details>
+
 ---
 
-## Setup
+<details>
+<summary><strong>Setup</strong></summary>
 
 ```bash
 python3 -m venv .venv
@@ -43,9 +50,12 @@ python3 -m venv .venv
 
 Copy `.env.example` to `.env` and fill in `TELEGRAM_TOKEN` and `TELEGRAM_CHAT_ID`.
 
+</details>
+
 ---
 
-## Config (`config.yaml`)
+<details>
+<summary><strong>Config (<code>config.yaml</code>)</strong></summary>
 
 ```yaml
 watchlist: [SPY, QQQ, IWM]   # options chains + GEX
@@ -70,9 +80,12 @@ earnings:
   est_min: 4
 ```
 
+</details>
+
 ---
 
-## CLI flags
+<details>
+<summary><strong>CLI flags</strong></summary>
 
 ```bash
 # earnings.py
@@ -87,9 +100,12 @@ earnings:
 .venv/bin/python events.py --next          # next week
 ```
 
+</details>
+
 ---
 
-## Telegram bot
+<details>
+<summary><strong>Telegram bot</strong></summary>
 
 ```
 /gamma             SPY gamma exposure (from daily snapshot)
@@ -106,9 +122,12 @@ earnings:
 
 Run: `set -a && source .env && set +a && .venv/bin/python bot.py`
 
+</details>
+
 ---
 
-## Automation (launchctl)
+<details>
+<summary><strong>Automation (launchctl)</strong></summary>
 
 | Plist | Schedule | What |
 |-------|----------|------|
@@ -124,3 +143,5 @@ launchctl list | grep tintrades
 ```
 
 Logs: `logs/tin_trades.log`, `logs/bot.log`, `logs/gamma.log`, `logs/options.log`
+
+</details>
