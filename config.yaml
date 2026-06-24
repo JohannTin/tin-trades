@@ -3,6 +3,15 @@ watchlist:
   - QQQ
   - IWM
 
+mag7:  # ordered by market cap desc — update manually if rankings shift
+  - AAPL
+  - NVDA
+  - MSFT
+  - AMZN
+  - GOOGL
+  - META
+  - TSLA
+
 prepost: true
 
 options:
