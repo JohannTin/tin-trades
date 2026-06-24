@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Daily pre-market brief: compute GEX for 10 tickers, push DAILY.md + gex.html.
+Daily pre-market brief: compute GEX for 10 tickers, push DAILY.md + daily.html.
 
 Usage:
     .venv/bin/python daily_report.py           # skip if market closed
@@ -339,7 +339,7 @@ tr:last-child td {{ border-bottom: none; }}
 </body>
 </html>"""
 
-    (BASE / 'gex.html').write_text(html)
+    (BASE / 'daily.html').write_text(html)
 
 
 def save_daily_summary(summaries):
@@ -349,7 +349,7 @@ def save_daily_summary(summaries):
 
 
 def git_push():
-    subprocess.run(['git', 'add', 'DAILY.md', 'gex.html'], check=True, cwd=BASE)
+    subprocess.run(['git', 'add', 'DAILY.md', 'daily.html'], check=True, cwd=BASE)
     subprocess.run(['git', 'commit', '-m', f'daily: {TODAY}'], check=True, cwd=BASE)
     subprocess.run(['git', 'push'], check=True, cwd=BASE)
 

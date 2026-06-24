@@ -10,7 +10,7 @@ Pre-market data pipeline for SPY, QQQ, IWM and MAG7. Collects options chains, co
 - Computes **GEX per strike** via Black-Scholes — identifies wall, support, resistance, and gamma environment (positive/negative)
 - Pulls **earnings calendar** (NASDAQ API, filtered by OI / market cap / analyst estimates)
 - Pulls **macro events** (ForexFactory, high-impact USD only)
-- Generates a **daily brief** (`gex.html` + `DAILY.md`) with a 2×5 GEX grid and today's earnings/events — auto-committed and pushed to GitHub at 9:20 AM ET
+- Generates a **daily brief** (`daily.html` + `DAILY.md`) with a 2×5 GEX grid and today's earnings/events — auto-committed and pushed to GitHub at 9:20 AM ET
 - Stores **1m OHLCV candles** after market close
 - Runs a **Telegram bot** for on-demand `/earnings` and `/events` queries
 - Serves a **local dashboard** at `localhost:8000` with live chain, GEX grid, and earnings/events tables
@@ -22,7 +22,7 @@ Pre-market data pipeline for SPY, QQQ, IWM and MAG7. Collects options chains, co
 
 | Script | Schedule | What |
 |--------|----------|------|
-| `daily_report.py` | Daily, 9:20 AM ET | Computes GEX for all 10 tickers → `gex.html` + `DAILY.md` → git push |
+| `daily_report.py` | Daily, 9:20 AM ET | Computes GEX for all 10 tickers → `daily.html` + `DAILY.md` → git push |
 | `options_data.py` | Daily, 9:00 AM ET | Full chain snapshot — OI, IV, volume for watchlist + MAG7 |
 | `options_data.py --quotes` | Daily, 9:35 AM ET | Patch bid/ask only (faster, post-open) |
 | `market_data.py` | Daily, 4:30 PM ET | 1m OHLCV candles for watchlist tickers |
@@ -180,7 +180,7 @@ data/
 
 ---
 
-## Daily brief (`gex.html`)
+## Daily brief (`daily.html`)
 
 Generated each morning at 9:20 ET and pushed to GitHub. Contains:
 
@@ -192,7 +192,7 @@ Generated each morning at 9:20 ET and pushed to GitHub. Contains:
   - ▲ RES / ▼ SUPP = key levels above/below spot
   - Footer: net GEX, POS/NEG environment
 
-Enable GitHub Pages (repo Settings → Pages → `main` branch, `/root`) to view `gex.html` online.
+View at **[https://johanntin.github.io/tin-trades/daily.html](https://johanntin.github.io/tin-trades/daily.html)** — enable once via repo Settings → Pages → `main` branch, `/root`.
 
 ---
 
