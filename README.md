@@ -17,7 +17,8 @@ Pre-market data pipeline for SPY, QQQ, IWM and MAG7. Collects options chains, co
 
 ---
 
-## Scripts
+<details>
+<summary><strong>Scripts</strong></summary>
 
 | Script | Schedule | What |
 |--------|----------|------|
@@ -54,9 +55,12 @@ launchctl list | grep tintrades
 launchctl unload ~/Library/LaunchAgents/com.tintrades.*.plist
 ```
 
+</details>
+
 ---
 
-## Setup
+<details>
+<summary><strong>Setup</strong></summary>
 
 ```bash
 python3 -m venv .venv
@@ -66,7 +70,8 @@ cp .env.example .env   # fill in TELEGRAM_TOKEN and TELEGRAM_CHAT_ID
 
 ---
 
-## Config (`config.yaml`)
+<details>
+<summary><strong>Config (<code>config.yaml</code>)</strong></summary>
 
 ```yaml
 watchlist:            # tickers for candles + options chains
@@ -94,6 +99,8 @@ earnings:
   cap_min: 10000000000  # minimum market cap ($10B)
   est_min: 4          # minimum analyst estimates
 ```
+
+</details>
 
 ---
 
@@ -130,11 +137,18 @@ set -a && source .env && set +a
 .venv/bin/python bot.py
 ```
 
+</details>
+
 ---
 
 ## Telegram bot commands
 
 ```
+/gamma             SPY gamma exposure (from daily snapshot)
+/gamma QQQ         QQQ gamma (snapshot if available, else live)
+/gamma NVDA        live GEX for any ticker
+/alert TICKER      alert when wall breaks or +GEX zone hit
+/alert off         clear all alerts
 /earnings          this week
 /earnings today    today only
 /earnings next     next week
@@ -161,6 +175,8 @@ data/
 
 **GEX columns:**
 `date, expiry, strike, gex`
+
+</details>
 
 ---
 

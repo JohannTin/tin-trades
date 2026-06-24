@@ -1,7 +1,9 @@
 .env
+*.sh
 .venv/
 __pycache__/
 *.pyc
 test/
 data/
 logs/
+.gstack/

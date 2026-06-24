@@ -1,9 +1,16 @@
+ibkr:
+  host: 127.0.0.1
+  port: 7497           # 7496 for paper trading
+  client_id: 10
+  readonly: true
+  gex_strikes_pct: 0.08   # strikes within ±8% of spot
+
 watchlist:
   - SPY
   - QQQ
   - IWM
 
-mag7:  # ordered by market cap desc — update manually if rankings shift
+mag7:
   - AAPL
   - NVDA
   - MSFT
