@@ -4,6 +4,10 @@ Pre-market data pipeline for SPY, QQQ, IWM and MAG7. Collects options chains, co
 
 ---
 
+[https://johanntin.github.io/tin-trades/daily.html](https://johanntin.github.io/tin-trades/daily.html)
+
+---
+
 ## What it does
 
 - Fetches **options chains** (OI, IV, bid/ask, volume) for SPY, QQQ, IWM + MAG7 at 9:00 and 9:35 AM ET
@@ -191,8 +195,6 @@ Generated each morning at 9:20 ET and pushed to GitHub. Contains:
   - Gold = wall (highest abs GEX strike)
   - ▲ RES / ▼ SUPP = key levels above/below spot
   - Footer: net GEX, POS/NEG environment
-
-View at **[https://johanntin.github.io/tin-trades/daily.html](https://johanntin.github.io/tin-trades/daily.html)** — enable once via repo Settings → Pages → `main` branch, `/root`.
 
 ---
 
