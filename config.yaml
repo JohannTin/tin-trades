@@ -1,7 +1,17 @@
+ibkr:
+  host: 127.0.0.1
+  port: 7497           # 7496 for paper trading
+  client_id: 10
+  readonly: true
+  gex_strikes_pct: 0.08   # strikes within ±8% of spot
+
 watchlist:
   - SPY
   - QQQ
   - IWM
+
+price_only:
+  - ^VIX
 
 prepost: true
 

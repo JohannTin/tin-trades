@@ -11,8 +11,8 @@ from utils import setup_logger, is_market_open, log_run
 with open('config.yaml') as f:
     cfg = yaml.safe_load(f)
 
-WATCHLIST = cfg['watchlist']
-PREPOST   = cfg.get('prepost', True)
+WATCHLIST  = cfg['watchlist'] + cfg.get('price_only', [])
+PREPOST    = cfg.get('prepost', True)
 TODAY_FMT = date.today().strftime('%Y-%m-%d')
 
 log = setup_logger()
@@ -69,6 +69,7 @@ def fetch_underlyings():
     if skipped:  parts.append(f'{skipped} skipped')
     if failed:   parts.append(f'{failed} failed')
     log.info(f'Underlying 1m candles: {", ".join(parts) or "nothing to do"} ({time.time()-t0:.1f}s)')
+    log.info(f'Tickers fetched: {", ".join(WATCHLIST)}')
 
 
 def main():

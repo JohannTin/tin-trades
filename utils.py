@@ -45,7 +45,6 @@ def log_run(logger, name):
     logger.info('=' * 50)
     logger.info(f'tin-trades {name} — {date.today()}')
     yield
-    logger.info(f'Done in {time.time()-t0:.1f}s')
     logger.info('=' * 50)
 
 
