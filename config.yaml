@@ -10,8 +10,14 @@ watchlist:
   - QQQ
   - IWM
 
-price_only:
-  - ^VIX
+mag7:
+  - AAPL
+  - NVDA
+  - MSFT
+  - AMZN
+  - GOOGL
+  - META
+  - TSLA
 
 prepost: true
 

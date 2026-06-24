@@ -19,7 +19,7 @@ from utils import setup_logger, is_market_open, log_run
 with open('config.yaml') as f:
     cfg = yaml.safe_load(f)
 
-WATCHLIST = cfg['watchlist']
+WATCHLIST = cfg['watchlist'] + cfg.get('mag7', [])
 TODAY     = date.today().isoformat()
 YEAR      = date.today().year
 QUOTES    = '--quotes' in sys.argv
