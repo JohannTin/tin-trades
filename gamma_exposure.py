@@ -1,28 +1,27 @@
 #!/usr/bin/env python3
 """
-GEX (Gamma Exposure) snapshot for watchlist tickers via TWS/IBKR OPRA.
+GEX snapshot via TWS/IBKR OPRA — runs at 9:05 AM ET, before market open.
 
-Run at 9:05 AM ET — 5 min after options_data.py captures today's OI.
-Requires: TWS or IB Gateway running with OPRA subscription.
+Computes gamma flip level (BS) + real greeks (IBKR) for all 10 tickers.
+Writes per-ticker parquet + summary JSON. DB snapshot is handled by gex_intraday.py.
 
-Output: data/gamma/{ticker}_gex_{year}.parquet + data/gamma/{ticker}_summary.json + Telegram.
+Requires: TWS running with OPRA subscription.
 """
 import json
-import math
 import yaml
 import pandas as pd
 from pathlib import Path
-from datetime import date
+from datetime import date, datetime, timezone
 
-import yfinance as yf
-from ib_insync import IB, Option
+import gex
+from ib_insync import IB
 from utils import setup_logger, is_market_open, log_run
 
 with open('config.yaml') as f:
     cfg = yaml.safe_load(f)
 
 IBKR        = cfg['ibkr']
-WATCHLIST   = cfg['watchlist']
+TICKERS     = cfg['watchlist'] + cfg.get('mag7', [])
 STRIKES_PCT = IBKR.get('gex_strikes_pct', 0.08)
 TODAY       = date.today().isoformat()
 YEAR        = date.today().year
@@ -36,171 +35,82 @@ def gex_path(ticker):
     return p
 
 
-def load_oi(ticker):
-    p = Path(f'data/options/{ticker}_chain_{YEAR}.parquet')
-    if not p.exists():
-        return None
-    df    = pd.read_parquet(p)
-    cols  = ['expiry', 'strike', 'call_oi', 'put_oi', 'call_iv', 'put_iv']
-    today = df[df['date'] == TODAY][cols]
-    return today if not today.empty else None
-
-
-def get_spot(ticker):
-    # ponytail: yfinance avoids needing a separate US equity subscription
-    info = yf.Ticker(ticker).fast_info
-    return info.get('lastPrice') or info.get('previousClose')
-
-
-def bs_gamma(S, K, T, sigma, r=0.05):
-    """Black-Scholes gamma — used for flip detection across all strikes."""
-    if T <= 0 or sigma <= 0 or S <= 0 or K <= 0:
-        return 0.0
-    d1 = (math.log(S / K) + (r + 0.5 * sigma ** 2) * T) / (sigma * math.sqrt(T))
-    return math.exp(-0.5 * d1 ** 2) / (math.sqrt(2 * math.pi) * S * sigma * math.sqrt(T))
-
-
 def compute_flip(oi_df, spot):
-    """
-    Find gamma flip using BS gamma + OI across all available strikes.
-    Returns (flip_strike, flip_zone) where flip_zone is 'above'/'below' when
-    the flip is outside the available strike range (no crossing found).
-    """
-    today_date = date.today()
+    """Gamma flip via cumulative BS GEX across all strikes."""
+    now  = datetime.now(timezone.utc)
     rows = []
     for _, row in oi_df.iterrows():
         try:
-            T = max((date.fromisoformat(row['expiry']) - today_date).days / 365, 1 / 365)
+            exp_dt = datetime.fromisoformat(row['expiry']).replace(hour=20, tzinfo=timezone.utc)
+            T = max((exp_dt - now).total_seconds() / (365.25 * 24 * 3600), 1 / (365 * 24))
         except Exception:
             continue
         iv = ((row.get('call_iv') or 0) + (row.get('put_iv') or 0)) / 2
         if iv <= 0:
             continue
-        gamma = bs_gamma(spot, row['strike'], T, iv)
-        rows.append({'strike': row['strike'],
-                     'gex':    (row['call_oi'] - row['put_oi']) * gamma * 100 * spot})
+        g = gex.bs_gamma(spot, row['strike'], T, iv)
+        rows.append({'strike': row['strike'], 'gex': (row['call_oi'] - row['put_oi']) * g * 100 * spot})
 
     if not rows:
         return None, None
 
-    df  = pd.DataFrame(rows).groupby('strike')['gex'].sum().reset_index().sort_values('strike')
-    df['cum_gex'] = df['gex'].cumsum()
-    shifted   = df['cum_gex'].shift(1, fill_value=df['cum_gex'].iloc[0])
-    flip_rows = df[shifted * df['cum_gex'] < 0]
-
-    if not flip_rows.empty:
-        return float(flip_rows['strike'].iloc[0]), None
-
-    # No crossing: cumulative stays on one side across all strikes
-    zone = 'above' if df['cum_gex'].iloc[-1] < 0 else 'below'
+    df = pd.DataFrame(rows).groupby('strike')['gex'].sum().reset_index().sort_values('strike')
+    df['cum'] = df['gex'].cumsum()
+    flips = df[df['cum'].shift(1, fill_value=df['cum'].iloc[0]) * df['cum'] < 0]
+    if not flips.empty:
+        return float(flips['strike'].iloc[0]), None
+    zone = 'above' if df['cum'].iloc[-1] < 0 else 'below'
     return None, zone
 
 
-def fetch_gammas(ib, ticker, spot, oi_df):
-    """
-    Request call modelGreeks for each (expiry, strike) pair near ATM.
-    Gamma is identical for calls and puts at same strike/expiry (put-call parity),
-    so we request only calls to halve the number of TWS subscriptions.
-    """
-    lo, hi = spot * (1 - STRIKES_PCT), spot * (1 + STRIKES_PCT)
-    pairs  = (oi_df[(oi_df['strike'] >= lo) & (oi_df['strike'] <= hi)]
-              [['expiry', 'strike']].drop_duplicates())
-
-    contracts = [
-        Option(ticker, row.expiry.replace('-', ''), row.strike, 'C', 'SMART', multiplier='100')
-        for row in pairs.itertuples()
-    ]
-    log.info(f'Qualifying {len(contracts)} contracts...')
-    valid = ib.qualifyContracts(*contracts)
-    log.info(f'{len(valid)} qualified')
-
-    tickers = []
-    BATCH   = 60
-    for i in range(0, len(valid), BATCH):
-        for c in valid[i:i + BATCH]:
-            tickers.append(ib.reqMktData(c, '', snapshot=True))
-        ib.sleep(5)
-
-    rows, missing = [], 0
-    for t in tickers:
-        c = t.contract
-        g = t.modelGreeks
-        if not g or g.gamma is None:
-            missing += 1
-            continue
-        exp = c.lastTradeDateOrContractMonth
-        rows.append({
-            'expiry': f'{exp[:4]}-{exp[4:6]}-{exp[6:8]}',
-            'strike': c.strike,
-            'gamma':  g.gamma,
-        })
-
-    if missing:
-        log.warning(f'{missing} contracts returned no greeks')
-    return pd.DataFrame(rows)
-
-
-def compute_gex(oi_df, gamma_df, spot):
-    df = oi_df.merge(gamma_df, on=['expiry', 'strike'], how='inner')
-    df['gex'] = (df['call_oi'] - df['put_oi']) * df['gamma'] * 100 * spot
-    agg  = df.groupby('strike')['gex'].sum().reset_index()
-    wall = float(agg.loc[agg['gex'].abs().idxmax(), 'strike'])
-    return df, wall
-
-
 def process_ticker(ib, ticker):
-    oi_df = load_oi(ticker)
+    oi_df = gex.load_oi(ticker)
     if oi_df is None:
-        log.error(f'{ticker}: no OI for today — run options_data.py first.')
+        log.error(f'{ticker}: no OI — run options_data.py first')
         return
 
-    spot = get_spot(ticker)
-    if not spot or spot != spot:
-        log.error(f'{ticker}: could not get spot price.')
+    spot = gex.get_spot(ticker)
+    if not spot:
+        log.error(f'{ticker}: no spot price')
         return
     log.info(f'{ticker} spot: {spot:.2f}')
 
     flip, flip_zone = compute_flip(oi_df, spot)
-    log.info(f'{ticker} BS flip: {flip}  zone: {flip_zone}')
+    log.info(f'{ticker} flip: {flip}  zone: {flip_zone}')
 
-    gamma_df = fetch_gammas(ib, ticker, spot, oi_df)
+    gamma_df = gex.fetch_ibkr_greeks(ib, ticker, spot, oi_df, STRIKES_PCT)
     if gamma_df.empty:
-        log.error(f'{ticker}: no gamma data returned. Check TWS connection and OPRA subscription.')
+        log.error(f'{ticker}: no IBKR greeks — check TWS and OPRA subscription')
         return
-    log.info(f'{ticker}: gamma received for {len(gamma_df)} (expiry, strike) pairs.')
+    log.info(f'{ticker}: greeks for {len(gamma_df)} (expiry, strike) pairs')
 
-    detail_df, wall = compute_gex(oi_df, gamma_df, spot)
-    total_gex       = detail_df['gex'].sum()
+    gex_df    = gex.ibkr_to_gex(oi_df, gamma_df, spot)
+    wall, support, resistance, total_gex = gex.levels(gex_df, spot)
 
-    detail_df.insert(0, 'date', TODAY)
-    detail_df.insert(1, 'spot', spot)
-    p = gex_path(ticker)
+    # Persist per-ticker GEX parquet
+    out = gex_df.assign(date=TODAY, spot=spot)[['date', 'spot', 'expiry', 'strike', 'gex']]
+    p   = gex_path(ticker)
     if p.exists():
-        existing  = pd.read_parquet(p)
-        detail_df = pd.concat([existing[existing['date'] != TODAY], detail_df],
-                              ignore_index=True)
-    detail_df.to_parquet(p, index=False)
+        existing = pd.read_parquet(p)
+        out = pd.concat([existing[existing['date'] != TODAY], out], ignore_index=True)
+    out.to_parquet(p, index=False)
 
-    summary_data = {
-        'date':      TODAY,
-        'spot':      round(spot, 2),
-        'flip':      round(flip, 2) if flip else None,
-        'flip_zone': flip_zone,
-        'wall':      round(wall, 2),
+    # Per-ticker summary JSON
+    flip_str = f'{flip:.2f}' if flip else (f'{flip_zone} range' if flip_zone else 'N/A')
+    summary  = {
+        'date': TODAY, 'spot': round(spot, 2),
+        'flip': round(flip, 2) if flip else None, 'flip_zone': flip_zone,
+        'wall': round(wall, 2) if wall else None,
+        'support': round(support, 2) if support else None,
+        'resistance': round(resistance, 2) if resistance else None,
         'total_gex': round(total_gex / 1e9, 3),
     }
-    Path(f'data/gamma/{ticker}_summary.json').write_text(json.dumps(summary_data))
+    Path(f'data/gamma/{ticker}_summary.json').write_text(json.dumps(summary))
 
-    sign     = 'neg (vol AMP)' if total_gex < 0 else 'pos (vol PIN)'
-    flip_str = (f'{flip:.2f}' if flip
-                else f'{flip_zone} range' if flip_zone else 'N/A')
-    log.info('\n' + (
-        f'GAMMA  {ticker}  {TODAY}\n'
-        f'Spot  {spot:.2f}\n'
-        f'Flip  {flip_str}\n'
-        f'Wall  {wall:.2f}\n'
-        f'GEX   {total_gex / 1e9:+.2f}B  {sign}'
-    ))
+    sign = 'NEG (vol AMP)' if total_gex < 0 else 'POS (vol PIN)'
+    log.info(f'GAMMA {ticker} | spot={spot:.2f} flip={flip_str} '
+             f'wall={wall} supp={support} res={resistance} '
+             f'GEX={total_gex/1e9:+.2f}B {sign}')
 
 
 def main():
@@ -213,7 +123,7 @@ def main():
         ib.connect(IBKR['host'], IBKR['port'], clientId=IBKR['client_id'],
                    readonly=IBKR.get('readonly', False))
         try:
-            for ticker in WATCHLIST:
+            for ticker in TICKERS:
                 process_ticker(ib, ticker)
         finally:
             ib.disconnect()

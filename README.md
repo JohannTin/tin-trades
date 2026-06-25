@@ -1,51 +1,205 @@
 # tin-trades
 
-Pre-market data pipeline for SPY, QQQ, IWM and MAG7. Collects options chains, computes gamma exposure (GEX), tracks earnings and macro events, and pushes a daily brief to GitHub before market open.
+Pre-market GEX pipeline for SPY, QQQ, IWM + MAG7. Fetches options chains, pulls real IBKR greeks every 30 minutes throughout the trading day, computes 0DTE and weekly gamma exposure, and publishes a daily brief + EOD chart to GitHub Pages.
+
+**[→ daily.html](https://johanntin.github.io/tin-trades/daily.html)**
 
 ---
 
-[https://johanntin.github.io/tin-trades/daily.html](https://johanntin.github.io/tin-trades/daily.html)
+## Architecture
+
+```mermaid
+flowchart TD
+    subgraph Sources
+        YF[yfinance\nOI · IV · spot · OHLCV]
+        TWS[IBKR TWS\nmodelGreeks · OPRA]
+        EXT[NASDAQ + ForexFactory\nearnings · macro events]
+    end
+
+    subgraph "Pre-Market"
+        direction LR
+        OP[9:00 AM ET\noptions_data.py\nfetch chain]
+        GE[9:05 AM ET\ngamma_exposure.py\nflip level]
+        GI1[9:15 AM ET\ngex_intraday.py\nopening snapshot]
+        DR[9:20 AM ET\ndaily_report.py\nbuild grid]
+    end
+
+    subgraph "Market Hours  ·  9:30 AM – 3:30 PM ET"
+        GI2[gex_intraday.py\nevery 30 min\n13 snapshots]
+    end
+
+    subgraph "Post-Market"
+        EOD[4:15 PM ET\neod_check.py\nEOD charts + wall trail]
+    end
+
+    subgraph Storage
+        CHAIN[(data/options\nchain parquets)]
+        GPAR[(data/gamma\ngex parquets)]
+        DB[(gex_levels.db\nmorning · intraday)]
+        EDB[(earnings.db\nevents.db)]
+    end
+
+    subgraph Output
+        HTML[daily.html\n2×5 GEX grid\n+ EOD charts]
+        MD[DAILY.md]
+        GHP[GitHub Pages]
+    end
+
+    YF --> OP
+    TWS --> GE
+    TWS --> GI1
+    TWS --> GI2
+    EXT --> EDB
+    OP --> CHAIN
+    GE --> GPAR
+    GI1 --> DB
+    GI2 --> DB
+    CHAIN --> DR
+    GPAR --> DR
+    DB --> DR
+    DB --> EOD
+    DR --> HTML
+    DR --> MD
+    EOD --> HTML
+    HTML --> GHP
+    MD --> GHP
+```
 
 ---
 
-## What it does
+## Daily schedule
 
-- Fetches **options chains** (OI, IV, bid/ask, volume) for SPY, QQQ, IWM + MAG7 at 9:00 and 9:35 AM ET
-- Computes **GEX per strike** via Black-Scholes — identifies wall, support, resistance, and gamma environment (positive/negative)
-- Pulls **earnings calendar** (NASDAQ API, filtered by OI / market cap / analyst estimates)
-- Pulls **macro events** (ForexFactory, high-impact USD only)
-- Generates a **daily brief** (`daily.html` + `DAILY.md`) with a 2×5 GEX grid and today's earnings/events — auto-committed and pushed to GitHub at 9:20 AM ET
-- Stores **1m OHLCV candles** after market close
-- Runs a **Telegram bot** for on-demand `/earnings` and `/events` queries
-- Serves a **local dashboard** at `localhost:8000` with live chain, GEX grid, and earnings/events tables
+| Time ET | Time PT | Script | What |
+|---------|---------|--------|------|
+| 9:00 AM | 6:00 AM | `options_data.py` | Full chain — OI, IV, volume, bid/ask for all 10 tickers |
+| 9:05 AM | 6:05 AM | `gamma_exposure.py` | IBKR real greeks → flip level → per-ticker GEX parquet |
+| 9:15 AM | 6:15 AM | `gex_intraday.py` | **Opening plan** — first IBKR snapshot, writes to `intraday` table |
+| 9:20 AM | 6:20 AM | `daily_report.py` | Reads 9:15 snapshot → 2×5 GEX grid → `daily.html` → git push |
+| 9:35 AM | 6:35 AM | `options_data.py --quotes` | Patch bid/ask only (post-open update) |
+| 9:30–3:30 | 6:30–12:30 | `gex_intraday.py` | 13 more snapshots every 30 min — tracks wall migration |
+| 4:15 PM | 1:15 PM | `eod_check.py` | 5m candlestick charts + GEX level lines + wall trail → appended to `daily.html` → git push |
+| Sunday | Sunday | `earnings.py` + `events.py` | Weekly earnings calendar + macro events |
 
 ---
 
-<details>
-<summary><strong>Scripts</strong></summary>
+## GEX system
 
-| Script | Schedule | What |
-|--------|----------|------|
-| `daily_report.py` | Daily, 9:20 AM ET | Computes GEX for all 10 tickers → `daily.html` + `DAILY.md` → git push |
-| `options_data.py` | Daily, 9:00 AM ET | Full chain snapshot — OI, IV, volume for watchlist + MAG7 |
-| `options_data.py --quotes` | Daily, 9:35 AM ET | Patch bid/ask only (faster, post-open) |
-| `market_data.py` | Daily, 4:30 PM ET | 1m OHLCV candles for watchlist tickers |
-| `earnings.py` | Sunday, 8:00 AM | Weekly earnings calendar |
-| `events.py` | Sunday, 8:00 AM | Weekly macro events |
-| `bot.py` | Always on | Telegram bot polling |
+### Two level sets per ticker
+
+Every snapshot computes **0DTE** and **weekly** GEX separately:
+
+| Set | Expiries | Use |
+|-----|---------|-----|
+| 0DTE | Today only | Highest gamma, intraday pin/magnet — what you trade |
+| Weekly | All expiries within 7 days | Structural levels, stable through the week |
+
+Both sets are shown on each tile and EOD chart.
+
+### How levels are derived
+
+```
+net GEX    = Σ (call_oi − put_oi) × gamma × 100 × spot
+wall       = strike with max |net GEX|          → gold  ★
+support    = highest |GEX| strike ≤ spot        → cyan  ▼
+resistance = highest |GEX| strike > spot        → magenta ▲
+env        = NEG if net_0DTE < 0  (vol AMP — dealers amplify moves)
+             POS if net_0DTE > 0  (vol PIN — dealers suppress moves)
+```
+
+Gamma comes from **IBKR `modelGreeks`** (OPRA subscribed, snapshot per contract). Falls back to Black-Scholes if market is closed or greeks unavailable.
+
+### Wall migration trail (EOD chart)
+
+`eod_check.py` reads all 14 intraday snapshots and overlays a dotted dark-gold trail on each chart showing where the 0DTE wall was at each snapshot. Converging toward price into the afternoon = strong pin forming.
+
+---
+
+## Tile layout
+
+```
+┌─────────────────────────────────────┐
+│ SPY                          733.08 │  ← ticker + spot
+│                               NEG ● │  ← 0DTE env
+│ 736 ░░░░░░░░                        │
+│ 735 ████████████████ ◆W             │  ← weekly wall
+│ 734 ██████           ▲ R            │  ← 0DTE resistance
+│ 733 ████████████████ ★              │  ← 0DTE wall (gold bar)
+│ 732 ██████                          │
+│ 731 ░░░                             │
+├─────────────────────────────────────┤
+│ 0D ★733  ▲734  ▼733                 │  ← 0DTE levels
+│  W ◆735  △735  ▽733                 │  ← weekly levels
+│ 0D -567B          W -857B           │  ← net GEX both sets
+└─────────────────────────────────────┘
+```
+
+---
+
+## Scripts
+
+| Script | Role |
+|--------|------|
+| `gex.py` | Core GEX module — `bs_gamma`, `fetch_ibkr_greeks`, `chain_to_gex`, `levels`, `save_snapshot`, `load_snapshots` |
+| `gex_intraday.py` | 30-min IBKR snapshot runner — writes to `intraday` table, BS fallback |
+| `gamma_exposure.py` | Flip level + per-ticker GEX parquet at open (IBKR) |
+| `options_data.py` | Options chain fetch via yfinance — OI, IV, volume, bid/ask |
+| `daily_report.py` | HTML/MD report — reads 9:15 snapshot, renders 2×5 tile grid |
+| `eod_check.py` | 5m candlestick charts with GEX levels + wall migration trail |
+| `earnings.py` | Weekly earnings calendar (NASDAQ API) |
+| `events.py` | Weekly macro events (ForexFactory, USD high-impact only) |
+| `market_data.py` | 1m OHLCV candles for watchlist |
+| `bot.py` | Telegram bot — `/gamma`, `/earnings`, `/events` |
+| `trades.py` | Trade log |
+
+---
+
+## Data
+
+```
+data/
+  options/{ticker}_chain_{year}.parquet     OI · IV · bid/ask · volume by expiry/strike
+  gamma/{ticker}_gex_{year}.parquet         IBKR GEX by date/expiry/strike
+  gamma/{ticker}_summary.json               latest flip + wall + net per ticker
+  gamma/daily_summary.json                  all tickers, latest run
+  gamma/gex_levels.db                       SQLite — morning + intraday snapshots
+  earnings.db                               weekly earnings calendar
+  events.db                                 macro events
+  candles/{ticker}_{year}.parquet           1m OHLCV
+```
+
+### `gex_levels.db` schema
+
+```sql
+-- Written by daily_report.py at 9:20 AM ET
+CREATE TABLE morning (
+    date TEXT, ticker TEXT, snap_time TEXT, spot REAL,
+    wall_0 REAL, support_0 REAL, resistance_0 REAL, net_0 REAL,
+    wall_w REAL, support_w REAL, resistance_w REAL, net_w REAL,
+    PRIMARY KEY (date, ticker));
+
+-- Written by gex_intraday.py — 14 rows per ticker per day
+CREATE TABLE intraday (
+    date TEXT, ticker TEXT, snap_time TEXT, spot REAL,
+    wall_0 REAL, support_0 REAL, resistance_0 REAL, net_0 REAL,
+    wall_w REAL, support_w REAL, resistance_w REAL, net_w REAL,
+    PRIMARY KEY (date, ticker, snap_time));
+```
 
 ---
 
 ## Automation (launchctl)
 
-All scripts run via macOS `launchctl`. Plists live in `~/Library/LaunchAgents/`.
+All scripts run via macOS `launchctl`. Plists in `~/Library/LaunchAgents/`.
 
-| Plist | Schedule |
-|-------|----------|
-| `com.tintrades.daily` | Daily 6:20 AM PT (9:20 ET) |
-| `com.tintrades.optionsdata` | Daily 6:00 + 6:35 AM PT |
-| `com.tintrades.marketdata` | Daily 1:30 PM PT |
-| `com.tintrades.weekly` | Sunday 8:00 AM PT |
+| Plist | Schedule PT |
+|-------|-------------|
+| `com.tintrades.optionsdata` | 6:00 AM + 6:35 AM daily |
+| `com.tintrades.gamma` | 6:05 AM daily |
+| `com.tintrades.gexintraday` | 6:15, 6:30, 7:00 … 12:30 (14 times) |
+| `com.tintrades.daily` | 6:20 AM daily |
+| `com.tintrades.eodcheck` | 1:15 PM daily |
+| `com.tintrades.marketdata` | 1:30 PM daily |
+| `com.tintrades.weekly` | Sunday 8:00 AM |
 | `com.tintrades.bot` | Always on (KeepAlive) |
 
 ```bash
@@ -55,146 +209,81 @@ launchctl load ~/Library/LaunchAgents/com.tintrades.*.plist
 # check status
 launchctl list | grep tintrades
 
-# unload all
-launchctl unload ~/Library/LaunchAgents/com.tintrades.*.plist
+# reload one
+launchctl unload ~/Library/LaunchAgents/com.tintrades.gexintraday.plist
+launchctl load   ~/Library/LaunchAgents/com.tintrades.gexintraday.plist
 ```
-
-</details>
 
 ---
 
-<details>
-<summary><strong>Setup</strong></summary>
+## Setup
 
 ```bash
 python3 -m venv .venv
 .venv/bin/pip install -r requirements.txt
-cp .env.example .env   # fill in TELEGRAM_TOKEN and TELEGRAM_CHAT_ID
+cp .env.example .env   # TELEGRAM_TOKEN + TELEGRAM_CHAT_ID
 ```
+
+**IBKR:** TWS must be running with API enabled (`Edit → Global Configuration → API → Settings → Enable ActiveX and Socket Clients`). OPRA subscription required for live greeks (~$1.50/month non-pro).
 
 ---
 
-<details>
-<summary><strong>Config (<code>config.yaml</code>)</strong></summary>
+## Config (`config.yaml`)
 
 ```yaml
-watchlist:            # tickers for candles + options chains
-  - SPY
-  - QQQ
-  - IWM
+ibkr:
+  host: 127.0.0.1
+  port: 7497                  # live TWS port (configured in TWS API settings)
+  client_id: 10
+  readonly: true
+  gex_strikes_pct: 0.08       # ±8% of spot for greek fetch
 
-mag7:                 # MAG7 for options chains + GEX only (no candles)
-  - AAPL
-  - NVDA
-  - MSFT
-  - AMZN
-  - GOOGL
-  - META
-  - TSLA
-
-prepost: true         # include pre/post market in 1m candles
-
-options:
-  strikes_n: 2        # strikes each side of ATM
-  chain_expiries: 2   # 0DTE + next Friday
-
-earnings:
-  oi_min:  5000       # minimum total options OI
-  cap_min: 10000000000  # minimum market cap ($10B)
-  est_min: 4          # minimum analyst estimates
+watchlist: [SPY, QQQ, IWM]   # daily expirations Mon–Fri
+mag7: [AAPL, NVDA, MSFT, AMZN, GOOGL, META, TSLA]  # Mon/Wed/Fri expirations
 ```
-
-</details>
 
 ---
 
-## CLI usage
+## CLI
 
 ```bash
-# daily brief (skip if market closed; --force to override)
-.venv/bin/python daily_report.py
+# GEX
+.venv/bin/python gex_intraday.py --force     # manual snapshot
+.venv/bin/python gamma_exposure.py           # flip + parquet (requires TWS)
+
+# Daily report
 .venv/bin/python daily_report.py --force
 
-# options chain
-.venv/bin/python options_data.py           # 9:00 AM — full chain
-.venv/bin/python options_data.py --quotes  # 9:35 AM — bid/ask patch
+# EOD charts
+.venv/bin/python eod_check.py --force
 
-# candles
-.venv/bin/python market_data.py
+# Options chain
+.venv/bin/python options_data.py             # full chain
+.venv/bin/python options_data.py --quotes    # bid/ask patch only
 
-# earnings
-.venv/bin/python earnings.py               # this week
-.venv/bin/python earnings.py --next        # next week
-.venv/bin/python earnings.py --week 27     # specific ISO week
-.venv/bin/python earnings.py --weeks 2     # span 2 weeks
-.venv/bin/python earnings.py --all         # no filter
-
-# events
-.venv/bin/python events.py                 # this week
-.venv/bin/python events.py --next          # next week
-
-# local dashboard
-.venv/bin/python test/server.py            # → http://localhost:8000
+# Earnings / events
+.venv/bin/python earnings.py                 # this week
+.venv/bin/python earnings.py --next
+.venv/bin/python events.py
 
 # Telegram bot
 set -a && source .env && set +a
 .venv/bin/python bot.py
 ```
 
-</details>
-
 ---
 
-## Telegram bot commands
+## Telegram bot
 
 ```
-/gamma             SPY gamma exposure (from daily snapshot)
-/gamma QQQ         QQQ gamma (snapshot if available, else live)
-/gamma NVDA        live GEX for any ticker
-/alert TICKER      alert when wall breaks or +GEX zone hit
-/alert off         clear all alerts
+/gamma             SPY GEX (from latest snapshot)
+/gamma QQQ         QQQ GEX
 /earnings          this week
-/earnings today    today only
-/earnings next     next week
-/events            this week
-/events next       next week
+/earnings today
+/earnings next
+/events
+/events next
 ```
-
----
-
-## Data
-
-```
-data/
-  earnings.db                                SQLite — weekly earnings calendar
-  events.db                                  SQLite — macro events
-  candles/{ticker}_{year}.parquet            1m OHLCV (datetime, open, high, low, close, volume)
-  options/{ticker}_chain_{year}.parquet      daily chain snapshot
-  gamma/{ticker}_gex_{year}.parquet          GEX by strike and expiry
-  gamma/daily_summary.json                   today's computed GEX summary (all tickers)
-```
-
-**Options chain columns:**
-`date, expiry, strike, call_oi, call_iv, call_bid, call_ask, call_volume, put_oi, put_iv, put_bid, put_ask, put_volume`
-
-**GEX columns:**
-`date, expiry, strike, gex`
-
-</details>
-
----
-
-## Daily brief (`daily.html`)
-
-Generated each morning at 9:20 ET and pushed to GitHub. Contains:
-
-- **Earnings today** — symbol, name, report time, EPS estimate, market cap
-- **Events today** — time, title, forecast, previous
-- **2×5 GEX grid** — one tile per ticker (SPY, QQQ, IWM, AAPL, NVDA, MSFT, AMZN, GOOGL, META, TSLA)
-  - Bars: magenta = positive GEX (pinning), cyan = negative GEX (volatile)
-  - Gold = wall (highest abs GEX strike)
-  - ▲ RES / ▼ SUPP = key levels above/below spot
-  - Footer: net GEX, POS/NEG environment
 
 ---
 
@@ -202,8 +291,11 @@ Generated each morning at 9:20 ET and pushed to GitHub. Contains:
 
 ```
 logs/
-  daily.log       daily_report.py
-  tin_trades.log  options_data.py + market_data.py
-  weekly.log      earnings.py + events.py
-  bot.log         bot.py
+  gex_intraday.log    gex_intraday.py  (14 entries/day)
+  gamma.log           gamma_exposure.py
+  daily.log           daily_report.py
+  eod.log             eod_check.py
+  options.log         options_data.py
+  weekly.log          earnings.py + events.py
+  bot.log             bot.py
 ```

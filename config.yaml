@@ -1,6 +1,6 @@
 ibkr:
   host: 127.0.0.1
-  port: 7497           # 7496 for paper trading
+  port: 7497           # live TWS port (configured in TWS API settings)
   client_id: 10
   readonly: true
   gex_strikes_pct: 0.08   # strikes within ±8% of spot

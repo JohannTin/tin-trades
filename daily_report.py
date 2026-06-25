@@ -11,19 +11,19 @@ import math
 import sqlite3
 import subprocess
 import sys
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 
 import pandas as pd
 import yaml
 import yfinance as yf
 
+import gex
 from utils import setup_logger, is_market_open, log_run
 
 BASE  = Path(__file__).parent
 TODAY = date.today().isoformat()
 YEAR  = date.today().year
-R     = 0.05  # risk-free rate for Black-Scholes
 FORCE = '--force' in sys.argv
 
 with open(BASE / 'config.yaml') as f:
@@ -35,77 +35,71 @@ log = setup_logger('daily', prefix='daily')
 
 # ── GEX computation ──────────────────────────────────────────────────────────
 
-def bs_gamma(S, K, T, sigma):
-    if T <= 0 or sigma <= 0 or S <= 0 or K <= 0:
-        return 0.0
-    d1 = (math.log(S / K) + (R + 0.5 * sigma ** 2) * T) / (sigma * math.sqrt(T))
-    return math.exp(-0.5 * d1 ** 2) / (math.sqrt(2 * math.pi) * S * sigma * math.sqrt(T))
-
-
-def compute_gex(ticker, spot):
-    pfile = BASE / f'data/options/{ticker}_chain_{YEAR}.parquet'
-    if not pfile.exists():
-        return pd.DataFrame(columns=['strike', 'expiry', 'gex'])
-    df = pd.read_parquet(pfile)
-    df = df[df['date'] == TODAY].copy()
-    if df.empty:
-        return pd.DataFrame(columns=['strike', 'expiry', 'gex'])
-    rows = []
-    for _, row in df.iterrows():
-        T = (pd.to_datetime(row['expiry']) - pd.Timestamp.today()).days / 365
-        if T <= 0:
-            continue
-        cg  = bs_gamma(spot, row['strike'], T, float(row.get('call_iv') or 0))
-        pg  = bs_gamma(spot, row['strike'], T, float(row.get('put_iv') or 0))
-        net = (cg * float(row.get('call_oi') or 0) - pg * float(row.get('put_oi') or 0)) * 100 * spot ** 2
-        rows.append({'strike': float(row['strike']), 'expiry': str(row['expiry']), 'gex': net})
-    return pd.DataFrame(rows) if rows else pd.DataFrame(columns=['strike', 'expiry', 'gex'])
+DB_PATH = BASE / 'data/gamma/gex_levels.db'
 
 
 def ticker_summary(ticker):
-    info = yf.Ticker(ticker).fast_info
-    spot = float(info.get('last_price') or info.get('previous_close') or 0)
+    d    = dict(yf.Ticker(ticker).fast_info)
+    spot = float(d.get('lastPrice') or d.get('previousClose') or 0)
 
-    gex_df = compute_gex(ticker, spot)
+    # Prefer 9:15 AM IBKR snapshot from intraday table
+    snaps = gex.load_snapshots(DB_PATH, 'intraday', TODAY, ticker)
+    first = snaps[0] if snaps else None
+    if first:
+        wall_0 = first['wall_0']; supp_0 = first['support_0']; res_0 = first['resistance_0']
+        net_0  = (first['net_0'] or 0) * 1e9
+        wall_w = first['wall_w']; supp_w = first['support_w']; res_w = first['resistance_w']
+        net_w  = (first['net_w'] or 0) * 1e9
+    else:
+        # Fallback: BS from chain parquet
+        chain = pd.DataFrame()
+        oi = gex.load_oi(ticker)
+        if oi is not None:
+            chain = oi
 
-    # Persist to parquet for server.py /api/gamma?ticker=
-    out = BASE / f'data/gamma/{ticker}_gex_{YEAR}.parquet'
-    out.parent.mkdir(exist_ok=True)
-    if not gex_df.empty:
-        save_df = gex_df.assign(date=TODAY)
-        if out.exists():
-            existing = pd.read_parquet(out)
-            save_df = pd.concat([existing[existing['date'] != TODAY], save_df], ignore_index=True)
-        save_df.to_parquet(out, index=False)
+        gex_0 = gex.chain_to_gex(chain[chain['expiry'] == TODAY], spot) if not chain.empty else pd.DataFrame(columns=['strike','expiry','gex'])
 
-    if gex_df.empty or spot == 0:
-        return {'ticker': ticker, 'spot': spot, 'wall': None, 'support': None,
-                'resistance': None, 'net': 0, 'env': 'NEG', 'strikes': []}
+        # Weekly: prefer IBKR parquet
+        gfile   = BASE / f'data/gamma/{ticker}_gex_{YEAR}.parquet'
+        gex_w   = pd.DataFrame(columns=['strike', 'expiry', 'gex'])
+        if gfile.exists():
+            _g = pd.read_parquet(gfile)
+            _today_g = _g[_g['date'] == TODAY][['strike', 'expiry', 'gex']]
+            if not _today_g.empty:
+                gex_w = _today_g.copy()
+        if gex_w.empty:
+            gex_w = gex.chain_to_gex(chain, spot)
 
-    agg  = gex_df.groupby('strike')['gex'].sum().reset_index()
-    wall = float(agg.loc[agg['gex'].abs().idxmax(), 'strike'])
-    net  = float(agg['gex'].sum())
+        wall_0, supp_0, res_0, net_0 = gex.levels(gex_0, spot)
+        wall_w, supp_w, res_w, net_w = gex.levels(gex_w, spot)
 
-    below = agg[agg['strike'] <= spot].sort_values('gex', key=lambda x: x.abs(), ascending=False)
-    above = agg[agg['strike'] >  spot].sort_values('gex', key=lambda x: x.abs(), ascending=False)
-    support    = float(below.iloc[0]['strike']) if not below.empty else None
-    resistance = float(above.iloc[0]['strike']) if not above.empty else None
+    if spot == 0:
+        return {'ticker': ticker, 'spot': 0,
+                'wall_0': None, 'support_0': None, 'resistance_0': None, 'net_0': 0,
+                'wall_w': None, 'support_w': None, 'resistance_w': None, 'net_w': 0,
+                'env': 'NEG', 'strikes': []}
 
-    # Tile: ±8 strikes around spot
-    all_s = sorted(agg['strike'].unique())
-    ci    = min(range(len(all_s)), key=lambda i: abs(all_s[i] - spot))
-    lo, hi = max(0, ci - 8), min(len(all_s), ci + 9)
-    tile  = agg[agg['strike'].isin(all_s[lo:hi])].sort_values('strike', ascending=False)
+    # Tile bars: 0DTE GEX (falls back to weekly if 0DTE empty)
+    primary = gex_0 if not gex_0.empty else gex_w
+    agg_t   = primary.groupby('strike')['gex'].sum().reset_index()
+    all_s   = sorted(agg_t['strike'].unique())
+    ci      = min(range(len(all_s)), key=lambda i: abs(all_s[i] - spot))
+    lo, hi  = max(0, ci - 8), min(len(all_s), ci + 9)
+    tile    = agg_t[agg_t['strike'].isin(all_s[lo:hi])].sort_values('strike', ascending=False)
 
     return {
-        'ticker':     ticker,
-        'spot':       round(spot, 2),
-        'wall':       wall,
-        'support':    support,
-        'resistance': resistance,
-        'net':        round(net),
-        'env':        'NEG' if net < 0 else 'POS',
-        'strikes':    tile[['strike', 'gex']].to_dict('records'),
+        'ticker':       ticker,
+        'spot':         round(spot, 2),
+        'wall_0':       wall_0,
+        'support_0':    supp_0,
+        'resistance_0': res_0,
+        'net_0':        round(net_0),
+        'wall_w':       wall_w,
+        'support_w':    supp_w,
+        'resistance_w': res_w,
+        'net_w':        round(net_w),
+        'env':          'NEG' if net_0 < 0 else 'POS',
+        'strikes':      tile[['strike', 'gex']].to_dict('records'),
     }
 
 
@@ -139,6 +133,7 @@ def read_events():
     return [dict(r) for r in rows]
 
 
+
 # ── SVG tile renderer (static, no JS) ────────────────────────────────────────
 
 def fmt_cap(n):
@@ -162,12 +157,14 @@ def render_tile_svg(d):
         )
 
     maxAbs   = max(abs(s['gex']) for s in strikes) or 1
-    isNeg    = d['net'] < 0
+    isNeg    = d['net_0'] < 0
     envColor = '#00e5e5' if isNeg else '#e040fb'
-    ROW_H, HDR_H, FOOT_H = 20, 30, 44
+    ROW_H, HDR_H, FOOT_H = 20, 30, 58
     LABEL_W, BAR_X, BAR_MAX = 40, 44, 148
     H = HDR_H + len(strikes) * ROW_H + FOOT_H
 
+    wall_0 = d.get('wall_0');  supp_0 = d.get('support_0');  res_0 = d.get('resistance_0')
+    wall_w = d.get('wall_w');  supp_w = d.get('support_w');  res_w = d.get('resistance_w')
     spotStrike = min(strikes, key=lambda s: abs(s['strike'] - d['spot']))['strike']
 
     p = []
@@ -179,31 +176,41 @@ def render_tile_svg(d):
     p.append(f'<text x="{W-8}" y="26" text-anchor="end" fill="{envColor}" font-size="9" font-family="monospace">{"NEG" if isNeg else "POS"} {env_sym}</text>')
 
     for i, row in enumerate(strikes):
-        y      = HDR_H + i * ROW_H
-        isWall = row['strike'] == d['wall']
-        isSpot = row['strike'] == spotStrike
-        isSupp = row['strike'] == d['support']
-        isRes  = row['strike'] == d['resistance']
+        y       = HDR_H + i * ROW_H
+        strike  = row['strike']
+        isWall0 = strike == wall_0
+        isWallW = strike == wall_w and strike != wall_0
+        isSpot  = strike == spotStrike
+        isSupp0 = strike == supp_0
+        isRes0  = strike == res_0
+        isSuppW = strike == supp_w and strike != supp_0
+        isResW  = strike == res_w  and strike != res_0
 
         rowBg = '#1e1a0e' if isSpot else ('#181818' if i % 2 else '#161616')
         p.append(f'<rect x="0" y="{y}" width="{W}" height="{ROW_H}" fill="{rowBg}"/>')
-        if isWall:
-            p.append(f'<rect x="{LABEL_W}" y="{y}" width="{W-LABEL_W}" height="{ROW_H}" fill="rgba(255,215,0,0.07)"/>')
+        if isWall0:
+            p.append(f'<rect x="{LABEL_W}" y="{y}" width="{W-LABEL_W}" height="{ROW_H}" fill="rgba(255,215,0,0.08)"/>')
+        elif isWallW:
+            p.append(f'<rect x="{LABEL_W}" y="{y}" width="{W-LABEL_W}" height="{ROW_H}" fill="rgba(255,215,0,0.03)"/>')
 
-        sc = '#ffd700' if isWall else ('#fbbf24' if isSpot else '#555')
-        p.append(f'<text x="{LABEL_W-3}" y="{y+ROW_H//2+4}" text-anchor="end" fill="{sc}" font-size="10" font-family="monospace">{int(row["strike"])}</text>')
+        sc = '#ffd700' if isWall0 else ('#b8860b' if isWallW else ('#fbbf24' if isSpot else '#555'))
+        p.append(f'<text x="{LABEL_W-3}" y="{y+ROW_H//2+4}" text-anchor="end" fill="{sc}" font-size="10" font-family="monospace">{int(strike)}</text>')
 
         bw = math.sqrt(abs(row['gex']) / maxAbs) * BAR_MAX
-        bc = '#ffd700' if isWall else ('#e040fb' if row['gex'] >= 0 else '#00e5e5')
+        bc = '#ffd700' if isWall0 else ('#e040fb' if row['gex'] >= 0 else '#00e5e5')
         if bw > 0.5:
             p.append(f'<rect x="{BAR_X}" y="{y+4}" width="{bw:.1f}" height="{ROW_H-8}" fill="{bc}" opacity="0.85" rx="1"/>')
 
-        if isWall:
-            p.append(f'<text x="{W-4}" y="{y+ROW_H//2+4}" text-anchor="end" fill="#ffd700" font-size="9" font-family="monospace">&#9733;</text>')
-        elif isRes:
-            p.append(f'<text x="{W-4}" y="{y+ROW_H//2+4}" text-anchor="end" fill="#e040fb" font-size="9" font-family="monospace">&#9650; RES</text>')
-        elif isSupp:
-            p.append(f'<text x="{W-4}" y="{y+ROW_H//2+4}" text-anchor="end" fill="#00e5e5" font-size="9" font-family="monospace">&#9660; SUPP</text>')
+        # Right-side labels: 0DTE markers solid, weekly markers dimmer
+        lbl, lcol = '', ''
+        if isWall0:   lbl, lcol = '&#9733;', '#ffd700'
+        elif isRes0:  lbl, lcol = '&#9650; R', '#e040fb'
+        elif isSupp0: lbl, lcol = '&#9660; S', '#00e5e5'
+        elif isWallW: lbl, lcol = '&#9670;W', '#7a6000'
+        elif isResW:  lbl, lcol = '&#9651;W', '#7a2060'
+        elif isSuppW: lbl, lcol = '&#9661;W', '#006060'
+        if lbl:
+            p.append(f'<text x="{W-4}" y="{y+ROW_H//2+4}" text-anchor="end" fill="{lcol}" font-size="9" font-family="monospace">{lbl}</text>')
 
         if isSpot:
             p.append(f'<line x1="{BAR_X}" y1="{y+ROW_H//2}" x2="{BAR_X+BAR_MAX}" y2="{y+ROW_H//2}" stroke="#fbbf24" stroke-width="1.5" stroke-dasharray="3,2" opacity="0.7"/>')
@@ -212,14 +219,19 @@ def render_tile_svg(d):
     p.append(f'<rect x="0" y="{fy}" width="{W}" height="{FOOT_H}" fill="#1a1a1a"/>')
     p.append(f'<line x1="0" y1="{fy}" x2="{W}" y2="{fy}" stroke="#222" stroke-width="1"/>')
 
-    wall_s = str(int(d['wall']))        if d['wall']        is not None else '—'
-    res_s  = str(int(d['resistance']))  if d['resistance']  is not None else '—'
-    supp_s = str(int(d['support']))     if d['support']     is not None else '—'
-    p.append(f'<text x="8" y="{fy+15}" fill="#555" font-size="9" font-family="monospace">&#9733; {wall_s}  &#9650; {res_s}  &#9660; {supp_s}</text>')
+    def _fmt(v): return str(int(v)) if v is not None else '—'
+    # 0DTE row
+    p.append(f'<text x="8" y="{fy+13}" fill="#666" font-size="8" font-family="monospace">0D &#9733;{_fmt(wall_0)} &#9650;{_fmt(res_0)} &#9660;{_fmt(supp_0)}</text>')
+    # Weekly row
+    p.append(f'<text x="8" y="{fy+25}" fill="#444" font-size="8" font-family="monospace"> W &#9670;{_fmt(wall_w)} &#9651;{_fmt(res_w)} &#9661;{_fmt(supp_w)}</text>')
 
-    netK   = round(d['net'] / 1000)
-    netStr = f'+${abs(netK):,}K' if netK >= 0 else f'-${abs(netK):,}K'
-    p.append(f'<text x="8" y="{fy+33}" fill="{envColor}" font-size="12" font-weight="bold" font-family="monospace">NET {netStr}</text>')
+    net0K  = round(d['net_0'] / 1000)
+    net0Str = f'+${abs(net0K):,}K' if net0K >= 0 else f'-${abs(net0K):,}K'
+    p.append(f'<text x="8" y="{fy+43}" fill="{envColor}" font-size="11" font-weight="bold" font-family="monospace">0D {net0Str}</text>')
+    netWK   = round(d['net_w'] / 1000)
+    netWStr = f'+${abs(netWK):,}K' if netWK >= 0 else f'-${abs(netWK):,}K'
+    wEnvC   = '#00e5e5' if d['net_w'] < 0 else '#e040fb'
+    p.append(f'<text x="{W//2+4}" y="{fy+43}" fill="{wEnvC}" font-size="9" font-family="monospace" opacity="0.6">W {netWStr}</text>')
 
     inner = ''.join(p)
     return f'<svg viewBox="0 0 {W} {H}" width="100%" xmlns="http://www.w3.org/2000/svg">{inner}</svg>'
@@ -251,14 +263,18 @@ def write_daily_md(summaries, earnings, events):
     lines.append('')
 
     lines += ['## GEX Summary', '']
-    lines.append('| Ticker | Spot | Wall | Support | Resistance | Net GEX | Env |')
-    lines.append('|--------|------|------|---------|------------|---------|-----|')
+    lines.append('| Ticker | Spot | 0DTE Wall | 0DTE Supp | 0DTE Res | Net 0DTE | Wk Wall | Wk Supp | Wk Res | Net Wk | Env |')
+    lines.append('|--------|------|-----------|-----------|----------|----------|---------|---------|--------|--------|-----|')
     for s in summaries:
-        netK = round(s['net'] / 1000)
-        wall_s = str(int(s['wall']))       if s['wall']       is not None else '—'
-        supp_s = str(int(s['support']))    if s['support']    is not None else '—'
-        res_s  = str(int(s['resistance'])) if s['resistance'] is not None else '—'
-        lines.append(f"| {s['ticker']} | {s['spot']} | {wall_s} | {supp_s} | {res_s} | ${netK:+,}K | {s['env']} |")
+        def _f(v): return str(int(v)) if v is not None else '—'
+        net0 = round(s['net_0'] / 1000)
+        netw = round(s['net_w'] / 1000)
+        lines.append(
+            f"| {s['ticker']} | {s['spot']} "
+            f"| {_f(s['wall_0'])} | {_f(s['support_0'])} | {_f(s['resistance_0'])} | ${net0:+,}K "
+            f"| {_f(s['wall_w'])} | {_f(s['support_w'])} | {_f(s['resistance_w'])} | ${netw:+,}K "
+            f"| {s['env']} |"
+        )
 
     (BASE / 'DAILY.md').write_text('\n'.join(lines) + '\n')
 
@@ -348,9 +364,20 @@ def save_daily_summary(summaries):
     out.write_text(json.dumps({'date': TODAY, 'tickers': summaries}, default=str))
 
 
+def save_morning_levels(summaries):
+    snap_time = datetime.now().strftime('%H:%M')
+    for s in summaries:
+        gex.save_snapshot(
+            DB_PATH, 'morning', TODAY, s['ticker'], snap_time, s['spot'],
+            (s['wall_0'], s['support_0'], s['resistance_0'], s['net_0']),
+            (s['wall_w'], s['support_w'], s['resistance_w'], s['net_w']),
+        )
+
+
 def git_push():
     subprocess.run(['git', 'add', 'DAILY.md', 'daily.html'], check=True, cwd=BASE)
-    subprocess.run(['git', 'commit', '-m', f'daily: {TODAY}'], check=True, cwd=BASE)
+    if subprocess.run(['git', 'diff', '--cached', '--quiet'], cwd=BASE).returncode != 0:
+        subprocess.run(['git', 'commit', '-m', f'daily: {TODAY}'], check=True, cwd=BASE)
     subprocess.run(['git', 'push'], check=True, cwd=BASE)
 
 
@@ -362,6 +389,7 @@ def main():
         log.info(f'Computing GEX for {len(TICKERS)} tickers: {", ".join(TICKERS)}')
         summaries = [ticker_summary(t) for t in TICKERS]
         save_daily_summary(summaries)
+        save_morning_levels(summaries)
         earnings = read_earnings()
         events   = read_events()
         write_daily_md(summaries, earnings, events)
