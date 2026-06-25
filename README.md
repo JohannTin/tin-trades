@@ -9,40 +9,46 @@ Pre-market GEX pipeline for SPY, QQQ, IWM + MAG7. Fetches options chains, pulls 
 ## Architecture
 
 ```mermaid
-flowchart TD
-    subgraph Sources
-        YF[yfinance\nOI · IV · spot · OHLCV]
-        TWS[IBKR TWS\nmodelGreeks · OPRA]
-        EXT[NASDAQ + ForexFactory\nearnings · macro events]
+flowchart LR
+    subgraph src["Sources"]
+        direction TB
+        YF["yfinance\nOI · IV · spot · OHLCV"]
+        TWS["IBKR TWS\nmodelGreeks · OPRA"]
+        EXT["NASDAQ + ForexFactory\nearnings · macro events"]
     end
 
-    subgraph "Pre-Market"
-        direction LR
-        OP[9:00 AM ET\noptions_data.py\nfetch chain]
-        GE[9:05 AM ET\ngamma_exposure.py\nflip level]
-        GI1[9:15 AM ET\ngex_intraday.py\nopening snapshot]
-        DR[9:20 AM ET\ndaily_report.py\nbuild grid]
+    subgraph fetchers["Data Fetchers"]
+        direction TB
+        subgraph pre["Pre-Market"]
+            direction TB
+            OP["options_data.py\n9:00 AM ET"]
+            GE["gamma_exposure.py\n9:05 AM ET"]
+            GI1["gex_intraday.py\n9:15 AM ET  opening snapshot"]
+        end
+        subgraph mkt["Market Hours  ·  9:30 AM – 3:30 PM ET"]
+            GI2["gex_intraday.py\nevery 30 min  ·  13 snapshots"]
+        end
     end
 
-    subgraph "Market Hours  ·  9:30 AM – 3:30 PM ET"
-        GI2[gex_intraday.py\nevery 30 min\n13 snapshots]
+    subgraph store["Storage"]
+        direction TB
+        CHAIN[("data/options\nchain parquets")]
+        GPAR[("data/gamma\ngex parquets")]
+        DB[("gex_levels.db\nmorning · intraday")]
+        EDB[("earnings.db\nevents.db")]
     end
 
-    subgraph "Post-Market"
-        EOD[4:15 PM ET\neod_check.py\nEOD charts + wall trail]
+    subgraph reports["Reports"]
+        direction TB
+        DR["daily_report.py\n9:20 AM ET  ·  2×5 GEX grid"]
+        EOD["eod_check.py\n4:15 PM ET  ·  EOD charts + wall trail"]
     end
 
-    subgraph Storage
-        CHAIN[(data/options\nchain parquets)]
-        GPAR[(data/gamma\ngex parquets)]
-        DB[(gex_levels.db\nmorning · intraday)]
-        EDB[(earnings.db\nevents.db)]
-    end
-
-    subgraph Output
-        HTML[daily.html\n2×5 GEX grid\n+ EOD charts]
-        MD[DAILY.md]
-        GHP[GitHub Pages]
+    subgraph out["Output"]
+        direction TB
+        HTML["daily.html"]
+        MD["DAILY.md"]
+        GHP["GitHub Pages"]
     end
 
     YF --> OP
