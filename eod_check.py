@@ -2,10 +2,12 @@
 """
 EOD check — append intraday price charts with morning GEX levels to daily.html.
 
-Run at 4:15 PM ET (1:15 PM PT), after market close.
-Reads morning wall/support/resistance from data/gamma/gex_levels.db,
-generates one intraday chart per ticker (5m bars + GEX level lines),
-appends them to daily.html as a 2x5 grid, and pushes to GitHub.
+Run at 4:15 PM ET after market close.
+
+Input:  data/gamma/gex_levels.db (morning GEX levels per ticker)
+        yfinance 5m intraday bars
+        daily.html (must exist from daily_report.py morning run)
+Output: daily.html with intraday chart grid appended; pushed to GitHub
 
 Usage:
     .venv/bin/python eod_check.py           # skip if market closed
@@ -44,7 +46,7 @@ log = setup_logger('eod', prefix='eod')
 
 
 def load_morning_levels():
-    """First intraday snapshot (9:15) if available, else morning table, else daily_summary.json."""
+    # Load the earliest GEX levels per ticker: intraday → morning table → daily_summary.json fallback.
     # Try intraday first (earliest snap = opening plan)
     all_snaps = gexlib.load_snapshots(DB_PATH, 'intraday', TODAY)
     if all_snaps:
@@ -71,11 +73,12 @@ def load_morning_levels():
 
 
 def load_intraday_trail(ticker):
-    """All intraday snapshots for ticker — used for wall migration trail on chart."""
+    # Return all intraday snapshots for ticker today — used to draw the 0DTE wall migration trail.
     return gexlib.load_snapshots(DB_PATH, 'intraday', TODAY, ticker)
 
 
 def generate_chart(ticker, levels, trail=None):
+    # Render 5m candlestick chart with GEX level lines and wall migration trail; returns base64 PNG or None.
     hist = yf.Ticker(ticker).history(period='1d', interval='5m')
     if hist.empty:
         return None
@@ -166,6 +169,7 @@ def generate_chart(ticker, levels, trail=None):
 
 
 def build_charts_section(levels):
+    # Generate chart HTML for every ticker and wrap in a grid section div.
     charts_html = ''
     for ticker in TICKERS:
         lv    = levels.get(ticker, {})
@@ -188,6 +192,7 @@ def build_charts_section(levels):
 
 
 def append_charts_to_html(section_html):
+    # Inject the chart section before </body> in daily.html in-place.
     html_path = BASE / 'daily.html'
     html = html_path.read_text()
     html = html.replace('</body>', section_html + '\n</body>')
@@ -195,6 +200,7 @@ def append_charts_to_html(section_html):
 
 
 def git_push():
+    # Stage daily.html, commit if changed, and push to GitHub.
     subprocess.run(['git', 'add', 'daily.html'], check=True, cwd=BASE)
     if subprocess.run(['git', 'diff', '--cached', '--quiet'], cwd=BASE).returncode != 0:
         subprocess.run(['git', 'commit', '-m', f'eod: {TODAY}'], check=True, cwd=BASE)
@@ -202,6 +208,7 @@ def git_push():
 
 
 def main():
+    # Orchestrate EOD: load levels, generate charts, append to daily.html, push.
     with log_run(log, 'eod_check'):
         if not is_market_open() and not FORCE:
             log.info('Market closed today. Skipping. (--force to override)')

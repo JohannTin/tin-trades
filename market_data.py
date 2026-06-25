@@ -1,4 +1,13 @@
 #!/usr/bin/env python3
+"""
+Intraday price data collector — downloads 1m OHLCV bars for the watchlist.
+
+Input:  config.yaml (watchlist, price_only, prepost); yfinance
+Output: data/candles/<TICKER>_<YEAR>.parquet — one row per 1m bar, appended daily
+
+Usage:
+    .venv/bin/python market_data.py   # skips if market closed
+"""
 import time
 import yaml
 import yfinance as yf
@@ -19,12 +28,14 @@ log = setup_logger()
 
 
 def parquet_path(ticker):
+    # Return the annual candle parquet path, creating parent dir if needed.
     p = Path(f'data/candles/{ticker}_{date.today().year}.parquet')
     p.parent.mkdir(parents=True, exist_ok=True)
     return p
 
 
 def already_fetched(ticker):
+    # Return True if today's date appears in the existing parquet (avoids duplicate fetches).
     p = parquet_path(ticker)
     if not p.exists():
         return False
@@ -33,6 +44,7 @@ def already_fetched(ticker):
 
 
 def save(df, ticker):
+    # Merge new 1m bars into the annual parquet, deduplicating by datetime.
     p = parquet_path(ticker)
     if p.exists():
         existing = pd.read_parquet(p)
@@ -41,6 +53,7 @@ def save(df, ticker):
 
 
 def fetch_underlyings():
+    # Download today's 1m OHLCV bars for the watchlist, skipping tickers already fetched today.
     t0 = time.time()
     fetched = skipped = failed = total_rows = 0
 
@@ -73,6 +86,7 @@ def fetch_underlyings():
 
 
 def main():
+    # Guard on market open, then run fetch_underlyings.
     with log_run(log, 'market_data'):
         if not is_market_open():
             log.info('Market closed today. Exiting.')

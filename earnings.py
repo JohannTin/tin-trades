@@ -5,6 +5,10 @@ Weekly earnings calendar — notable companies only.
 Filters: OI >= 5,000  OR  (market cap >= $10B AND analyst estimates >= 4)
 Sorted by total options open interest descending.
 
+Input:  Nasdaq earnings API (api.nasdaq.com/api/calendar/earnings)
+        yfinance for total OI per symbol
+Output: data/earnings.db (SQLite); Telegram message; terminal table
+
 Usage:
     .venv/bin/python earnings.py                # this week
     .venv/bin/python earnings.py --next         # next week
@@ -56,6 +60,7 @@ EST_MIN = _ecfg.get('est_min', 4)
 # --- DB ---
 
 def get_db():
+    # Open (or create) earnings SQLite DB with WAL mode; creates table on first run.
     os.makedirs('data', exist_ok=True)
     conn = sqlite3.connect(EARNINGS_DB)
     conn.execute('PRAGMA journal_mode=WAL')
@@ -81,6 +86,7 @@ def get_db():
 
 
 def save_earnings(results, year, week):
+    # Upsert fetched earnings rows keyed by (year, week, symbol).
     conn       = get_db()
     fetched_at = datetime.now().isoformat(timespec='seconds')
     conn.executemany(
@@ -99,10 +105,12 @@ def save_earnings(results, year, week):
 # --- Helpers ---
 
 def parse_cap(s):
+    # Strip non-digit characters from a Nasdaq market cap string and return as int.
     return int(re.sub(r'[^\d]', '', s or '') or 0)
 
 
 def fmt_cap(n):
+    # Format a raw number as a human-readable market cap string (T/B/M).
     if n >= 1_000_000_000_000: return f'${n/1e12:.1f}T'
     if n >= 1_000_000_000:     return f'${n/1e9:.1f}B'
     if n >= 1_000_000:         return f'${n/1e6:.0f}M'
@@ -110,16 +118,19 @@ def fmt_cap(n):
 
 
 def fmt_time(t):
+    # Map Nasdaq report-time key to a short label (pre/aft/-).
     if t == 'time-pre-market':  return 'pre'
     if t == 'time-after-hours': return 'aft'
     return ' - '
 
 
 def week_trading_days(monday):
+    # Return the market-open days (Mon–Fri) for the week starting on monday.
     return [monday + timedelta(days=i) for i in range(5) if is_market_open(monday + timedelta(days=i))]
 
 
 def fetch_nasdaq(day):
+    # GET Nasdaq earnings calendar for one date; returns [] on any network/parse error.
     try:
         r = requests.get(f'https://api.nasdaq.com/api/calendar/earnings?date={day}',
                          headers=HEADERS, timeout=10)
@@ -131,6 +142,7 @@ def fetch_nasdaq(day):
 
 
 def get_oi(sym, earn_date):
+    # Fetch total options OI for sym using the first expiry on or after earn_date.
     try:
         t    = yf.Ticker(sym)
         exps = t.options
@@ -146,6 +158,7 @@ def get_oi(sym, earn_date):
 
 
 def is_notable(cap, ests, oi):
+    # Return True if the symbol passes the OI or large-cap + analyst count filter.
     if SHOW_ALL:
         return True
     return oi >= OI_MIN or (cap >= CAP_MIN and ests >= EST_MIN)
@@ -154,6 +167,7 @@ def is_notable(cap, ests, oi):
 # --- Per-week run ---
 
 def already_ran(year, week):
+    # Check if any earnings rows already exist for year/week; used to skip duplicate runs.
     conn = get_db()
     row  = conn.execute('SELECT 1 FROM earnings WHERE year=? AND week=? LIMIT 1', (year, week)).fetchone()
     conn.close()
@@ -161,6 +175,7 @@ def already_ran(year, week):
 
 
 def run_week(monday):
+    # Full pipeline for one ISO week: fetch Nasdaq, filter, get OI, save to DB, print table, send Telegram.
     t0   = time.time()
     days = week_trading_days(monday)
     if not days:
@@ -240,6 +255,7 @@ def run_week(monday):
 # --- Entry point ---
 
 def start_monday():
+    # Resolve the target Monday from CLI args (--week, --next, or this week).
     if WEEK_NUM is not None:
         return date.fromisocalendar(date.today().year, WEEK_NUM, 1)
     offset = 1 if NEXT_WEEK else 0

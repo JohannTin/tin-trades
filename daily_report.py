@@ -1,6 +1,14 @@
 #!/usr/bin/env python3
 """
-Daily pre-market brief: compute GEX for 10 tickers, push DAILY.md + daily.html.
+Daily pre-market brief: compute GEX for watchlist tickers, push DAILY.md + daily.html.
+
+Input:  data/options/<TICKER>_chain_<YEAR>.parquet (OI + IV)
+        data/gamma/gex_levels.db (IBKR intraday snapshots, optional)
+        data/gamma/<TICKER>_gex_<YEAR>.parquet (IBKR GEX parquet, optional)
+        data/earnings.db, data/events.db
+Output: DAILY.md, daily.html pushed to GitHub
+        data/gamma/daily_summary.json
+        data/gamma/gex_levels.db [morning table] updated
 
 Usage:
     .venv/bin/python daily_report.py           # skip if market closed
@@ -39,6 +47,7 @@ DB_PATH = BASE / 'data/gamma/gex_levels.db'
 
 
 def ticker_summary(ticker):
+    # Compute spot + 0DTE/weekly GEX levels for one ticker; prefers IBKR DB snapshot, falls back to BS from chain parquet.
     d    = dict(yf.Ticker(ticker).fast_info)
     spot = float(d.get('lastPrice') or d.get('previousClose') or 0)
 
@@ -106,6 +115,7 @@ def ticker_summary(ticker):
 # ── Data sources ──────────────────────────────────────────────────────────────
 
 def read_earnings():
+    # Load today's earnings rows from SQLite; returns [] if DB missing.
     db = BASE / 'data/earnings.db'
     if not db.exists():
         return []
@@ -120,6 +130,7 @@ def read_earnings():
 
 
 def read_events():
+    # Load today's macro events from SQLite; returns [] if DB missing.
     db = BASE / 'data/events.db'
     if not db.exists():
         return []
@@ -137,6 +148,7 @@ def read_events():
 # ── SVG tile renderer (static, no JS) ────────────────────────────────────────
 
 def fmt_cap(n):
+    # Format a raw number as a human-readable market cap string (T/B/M).
     if not n: return '—'
     if n >= 1e12: return f'{n/1e12:.1f}T'
     if n >= 1e9:  return f'{n/1e9:.1f}B'
@@ -144,6 +156,7 @@ def fmt_cap(n):
 
 
 def render_tile_svg(d):
+    # Render a dark-theme SVG GEX bar chart for one ticker: header, strike rows, footer with net GEX.
     strikes = d['strikes']
     W = 240
     if not strikes:
@@ -240,6 +253,7 @@ def render_tile_svg(d):
 # ── Output files ──────────────────────────────────────────────────────────────
 
 def write_daily_md(summaries, earnings, events):
+    # Write DAILY.md with earnings, macro events, and GEX summary table.
     lines = [f'# Daily Overview — {TODAY}', '']
 
     lines += ['## Earnings Today', '']
@@ -280,6 +294,7 @@ def write_daily_md(summaries, earnings, events):
 
 
 def write_gex_html(summaries, earnings, events):
+    # Write daily.html with earnings panel, events panel, and SVG GEX tile grid.
     earning_rows = ''.join(
         f'<tr><td><strong>{r["symbol"]}</strong></td>'
         f'<td style="text-align:left">{r["name"] or ""}</td>'
@@ -359,12 +374,14 @@ tr:last-child td {{ border-bottom: none; }}
 
 
 def save_daily_summary(summaries):
+    # Persist full summaries list to data/gamma/daily_summary.json for downstream use.
     out = BASE / 'data/gamma/daily_summary.json'
     out.parent.mkdir(exist_ok=True)
     out.write_text(json.dumps({'date': TODAY, 'tickers': summaries}, default=str))
 
 
 def save_morning_levels(summaries):
+    # Upsert one morning GEX snapshot row per ticker into the DB.
     snap_time = datetime.now().strftime('%H:%M')
     for s in summaries:
         gex.save_snapshot(
@@ -375,6 +392,7 @@ def save_morning_levels(summaries):
 
 
 def git_push():
+    # Stage DAILY.md + daily.html, commit if changed, and push to GitHub.
     subprocess.run(['git', 'add', 'DAILY.md', 'daily.html'], check=True, cwd=BASE)
     if subprocess.run(['git', 'diff', '--cached', '--quiet'], cwd=BASE).returncode != 0:
         subprocess.run(['git', 'commit', '-m', f'daily: {TODAY}'], check=True, cwd=BASE)
@@ -382,6 +400,7 @@ def git_push():
 
 
 def main():
+    # Orchestrate the full daily report: compute GEX, write files, push to GitHub.
     with log_run(log, 'daily'):
         if not is_market_open() and not FORCE:
             log.info('Market closed today. Skipping. (--force to override)')

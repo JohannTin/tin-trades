@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
 """
-Telegram command bot.
+Telegram command bot — long-poll loop dispatching commands to handlers.
 
 Commands:
-  /earnings          — this week
-  /earnings today    — today only
-  /earnings next     — next week
-  /events            — this week
-  /events next       — next week
+  /gamma [TICKER]        — GEX summary (cached JSON or live yfinance)
+  /alert TICKER|off      — wall/+GEX price alert; auto-clears at 4 PM ET
+  /earnings [today|next] — weekly earnings calendar from SQLite
+  /events [next]         — high-impact USD macro events from ForexFactory
+
+Input:  TELEGRAM_TOKEN env var; data/earnings.db; data/gamma/<TICKER>_summary.json
+Output: Telegram messages to chat; no file writes
 
 Run: set -a && source .env && set +a && .venv/bin/python bot.py
 """
@@ -30,12 +32,14 @@ log     = setup_logger('bot', prefix='bot')
 
 
 def send(chat_id, text):
+    # POST an HTML-formatted monospace message to a Telegram chat.
     requests.post(f'{BASE}/sendMessage',
                   json={'chat_id': chat_id, 'text': f'<pre>{text}</pre>', 'parse_mode': 'HTML'},
                   timeout=10)
 
 
 def fmt_cap(n):
+    # Format a raw number as a human-readable market cap string (T/B/M).
     if not n: return '-'
     if n >= 1_000_000_000_000: return f'${n/1e12:.1f}T'
     if n >= 1_000_000_000:     return f'${n/1e9:.1f}B'
@@ -44,6 +48,7 @@ def fmt_cap(n):
 
 
 def earnings_text(filter_date=None, next_week=False):
+    # Build a formatted earnings table for a specific date or ISO week from SQLite.
     today  = date.today()
     offset = 1 if next_week else 0
     monday = today + timedelta(weeks=offset)
@@ -85,6 +90,7 @@ def earnings_text(filter_date=None, next_week=False):
 
 
 def _bs_gamma(S, K, T, sigma, r=0.05):
+    # Local BS gamma for live /gamma and /alert commands — avoids importing gex module.
     if T <= 0 or sigma <= 0 or S <= 0 or K <= 0:
         return 0.0
     d1 = (math.log(S / K) + (r + 0.5 * sigma**2) * T) / (sigma * math.sqrt(T))
@@ -92,6 +98,7 @@ def _bs_gamma(S, K, T, sigma, r=0.05):
 
 
 def gex_live(ticker):
+    # Compute live GEX from yfinance (nearest expiry only) and return a formatted string.
     try:
         import yfinance as yf
         import pandas as pd
@@ -146,6 +153,7 @@ def gex_live(ticker):
 
 
 def alert_set(ticker, chat_id):
+    # Register a wall/+GEX alert for ticker: fires when spot breaks the wall or enters +GEX zone.
     import yfinance as yf
     import pandas as pd
 
@@ -184,6 +192,7 @@ def alert_set(ticker, chat_id):
 
 
 def alert_thread():
+    # Background loop: check active alerts every 5 min; fire and clear if price crosses level; clears all at 4 PM ET.
     import yfinance as yf
 
     while True:
@@ -218,6 +227,7 @@ def alert_thread():
 
 
 def gamma_text(ticker='SPY'):
+    # Read pre-computed GEX summary JSON and return a formatted string; warns if stale or missing.
     p = Path(f'data/gamma/{ticker}_summary.json')
     if not p.exists():
         return f'No GEX data for {ticker} yet. Runs at 9:05 AM ET.'
@@ -236,6 +246,7 @@ def gamma_text(ticker='SPY'):
 
 
 def events_text(next_week=False):
+    # Fetch ForexFactory high-impact USD events and return a day-by-day formatted string.
     url = ('https://nfs.faireconomy.media/ff_calendar_nextweek.json' if next_week
            else 'https://nfs.faireconomy.media/ff_calendar_thisweek.json')
     try:
@@ -272,6 +283,7 @@ def events_text(next_week=False):
 
 
 def handle(msg):
+    # Parse a Telegram message and dispatch to the appropriate handler; unknown commands are silently ignored.
     chat_id = msg['chat']['id']
     text    = msg.get('text', '').strip()
     parts   = text.lower().split()
@@ -318,6 +330,7 @@ def handle(msg):
 
 
 def poll():
+    # Telegram long-poll loop: starts the alert background thread, then processes updates indefinitely.
     threading.Thread(target=alert_thread, daemon=True).start()
     offset = 0
     log.info('Bot started.')

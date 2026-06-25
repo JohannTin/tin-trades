@@ -3,7 +3,9 @@
 GEX intraday snapshots — fetch real IBKR greeks every 30 min, 9:15–3:30 ET.
 
 Fires via launchctl at: 6:15 6:30 7:00 7:30 8:00 8:30 9:00 9:30 10:00 10:30 11:00 11:30 12:00 12:30 PT
-Writes one row per ticker to data/gamma/gex_levels.db [intraday] table.
+
+Input:  data/options/<TICKER>_chain_<YEAR>.parquet (OI); IBKR TWS (live greeks)
+Output: data/gamma/gex_levels.db [intraday table] — one row per (ticker, snap_time)
 
 Usage:
     .venv/bin/python gex_intraday.py           # skip if market closed
@@ -35,6 +37,8 @@ log = setup_logger('gex_intraday', prefix='gex_intraday')
 
 
 def snapshot_ticker(ib, ticker, snap_time):
+    # Compute 0DTE + weekly GEX levels for one ticker at snap_time and write to the intraday DB table.
+    # Falls back to BS gamma if IBKR returns no greeks.
     spot = gex.get_spot(ticker)
     if not spot:
         log.warning(f'{ticker}: no spot price')
@@ -79,6 +83,7 @@ def snapshot_ticker(ib, ticker, snap_time):
 
 
 def main():
+    # Connect to IBKR TWS and snapshot all tickers at the current time.
     with log_run(log, 'gex_intraday'):
         if not is_market_open() and not FORCE:
             log.info('Market closed. Skipping. (--force to override)')

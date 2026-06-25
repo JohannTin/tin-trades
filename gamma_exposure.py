@@ -2,8 +2,11 @@
 """
 GEX snapshot via TWS/IBKR OPRA — runs at 9:05 AM ET, before market open.
 
-Computes gamma flip level (BS) + real greeks (IBKR) for all 10 tickers.
-Writes per-ticker parquet + summary JSON. DB snapshot is handled by gex_intraday.py.
+Computes gamma flip (BS) + real greeks (IBKR) for all watchlist tickers.
+
+Input:  data/options/<TICKER>_chain_<YEAR>.parquet (OI + IV); IBKR TWS (live greeks)
+Output: data/gamma/<TICKER>_gex_<YEAR>.parquet (IBKR GEX rows)
+        data/gamma/<TICKER>_summary.json (spot, flip, wall, support, resistance, total_gex)
 
 Requires: TWS running with OPRA subscription.
 """
@@ -30,13 +33,15 @@ log = setup_logger('gamma', prefix='gamma')
 
 
 def gex_path(ticker):
+    # Return the parquet path for per-ticker GEX rows, creating the parent dir if needed.
     p = Path(f'data/gamma/{ticker}_gex_{YEAR}.parquet')
     p.parent.mkdir(parents=True, exist_ok=True)
     return p
 
 
 def compute_flip(oi_df, spot):
-    """Gamma flip via cumulative BS GEX across all strikes."""
+    # Find the gamma flip price: the strike where cumulative BS GEX crosses zero.
+    # Returns (flip_price, None) or (None, zone) if no zero-crossing exists in range.
     now  = datetime.now(timezone.utc)
     rows = []
     for _, row in oi_df.iterrows():
@@ -64,6 +69,7 @@ def compute_flip(oi_df, spot):
 
 
 def process_ticker(ib, ticker):
+    # Full pipeline for one ticker: load OI, fetch IBKR greeks, compute GEX levels, write parquet + summary JSON.
     oi_df = gex.load_oi(ticker)
     if oi_df is None:
         log.error(f'{ticker}: no OI — run options_data.py first')
@@ -114,6 +120,7 @@ def process_ticker(ib, ticker):
 
 
 def main():
+    # Connect to IBKR TWS and run process_ticker for each watchlist ticker.
     with log_run(log, 'gamma_exposure'):
         if not is_market_open():
             log.info('Market closed today. Exiting.')

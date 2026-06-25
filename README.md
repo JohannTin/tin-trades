@@ -57,6 +57,7 @@ flowchart TD
     CHAIN --> DR
     GPAR --> DR
     DB --> DR
+    EDB --> DR
     DB --> EOD
     DR --> HTML
     DR --> MD

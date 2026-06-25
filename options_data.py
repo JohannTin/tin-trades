@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 """
-Options chain snapshot.
+Options chain snapshot — downloads OI, IV, volume, and bid/ask for the watchlist.
+
+Input:  yfinance options chain API
+Output: data/options/<TICKER>_chain_<YEAR>.parquet — one row per (date, expiry, strike)
 
 Usage:
     .venv/bin/python options_data.py           # 9:00 AM — full chain (OI, IV, volume, bid/ask)
@@ -28,25 +31,24 @@ log = setup_logger('options', prefix='options')
 
 
 def chain_path(ticker):
+    # Return the annual chain parquet path, creating parent dir if needed.
     p = Path(f'data/options/{ticker}_chain_{YEAR}.parquet')
     p.parent.mkdir(parents=True, exist_ok=True)
     return p
 
 
 def get_expiries(ticker):
-    exps  = yf.Ticker(ticker).options
-    today = date.today().isoformat()
-    result = []
-    if today in exps:
-        result.append(today)
-    friday = next((e for e in exps if e > today and
-                   date.fromisoformat(e).weekday() == 4), None)
-    if friday and friday not in result:
-        result.append(friday)
-    return result or [exps[0]]
+    # Return expiry dates from today through +7 days (max 8); falls back to nearest expiry if none in range.
+    from datetime import timedelta
+    exps   = yf.Ticker(ticker).options
+    today  = date.today().isoformat()
+    cutoff = (date.today() + timedelta(days=7)).isoformat()
+    result = [e for e in exps if today <= e <= cutoff]
+    return result[:8] or [exps[0]]
 
 
 def fetch_chain(ticker):
+    # Fetch full chain (OI, IV, volume, bid/ask) for all near-term expiries and upsert into parquet.
     t0       = time.time()
     expiries = get_expiries(ticker)
     tkr      = yf.Ticker(ticker)
@@ -75,6 +77,7 @@ def fetch_chain(ticker):
 
 
 def update_quotes(ticker):
+    # Refresh bid/ask columns only for today's rows — lighter 9:35 AM run that skips OI/IV re-fetch.
     t0 = time.time()
     p  = chain_path(ticker)
     if not p.exists():
@@ -114,6 +117,7 @@ def update_quotes(ticker):
 
 
 def main():
+    # Guard on market open, then run full chain fetch or quotes-only update per --quotes flag.
     label = 'options --quotes' if QUOTES else 'options'
     with log_run(log, label):
         if not is_market_open():

@@ -1,4 +1,13 @@
-"""GEX computation utilities — shared across options_data, gamma_exposure, daily_report, eod_check."""
+"""
+GEX computation utilities — shared across options_data, gamma_exposure, daily_report, eod_check.
+
+Input:  data/options/<TICKER>_chain_<YEAR>.parquet (OI + IV)
+        ib_insync IB connection for live greeks (fetch_ibkr_greeks)
+        data/gamma/gex_levels.db for snapshot persistence
+Output: GEX DataFrames (columns: strike, expiry, gex)
+        key levels tuple (wall, support, resistance, net_gex)
+        persisted rows in SQLite intraday / morning tables
+"""
 import math
 import sqlite3
 from datetime import date, datetime, timezone
@@ -14,6 +23,7 @@ R = 0.05  # risk-free rate
 # ── Core maths ────────────────────────────────────────────────────────────────
 
 def bs_gamma(S, K, T, sigma):
+    # Black-Scholes gamma: PDF of d1 scaled by S·σ·√T. Returns 0 for degenerate inputs.
     if T <= 0 or sigma <= 0 or S <= 0 or K <= 0:
         return 0.0
     d1 = (math.log(S / K) + (R + 0.5 * sigma ** 2) * T) / (sigma * math.sqrt(T))
@@ -23,11 +33,13 @@ def bs_gamma(S, K, T, sigma):
 # ── Data loading ──────────────────────────────────────────────────────────────
 
 def get_spot(ticker):
+    # Fetch last price from yfinance fast_info; falls back to previousClose.
     d = dict(yf.Ticker(ticker).fast_info)
     return float(d.get('lastPrice') or d.get('previousClose') or 0)
 
 
 def load_oi(ticker, today=None, year=None):
+    # Load today's OI + IV rows from the annual chain parquet. Returns None if file missing or date has no rows.
     today = today or date.today().isoformat()
     year  = year  or date.today().year
     p = Path(f'data/options/{ticker}_chain_{year}.parquet')
@@ -41,7 +53,8 @@ def load_oi(ticker, today=None, year=None):
 # ── GEX computation ───────────────────────────────────────────────────────────
 
 def chain_to_gex(oi_df, spot, as_of=None):
-    """BS GEX from chain OI + IV. as_of=datetime(utc) for T calculation."""
+    # Compute GEX per (expiry, strike) using BS gamma and stored IV.
+    # as_of lets callers pin the reference time (useful for backtesting).
     ref  = as_of or datetime.now(timezone.utc)
     rows = []
     for _, row in oi_df.iterrows():
@@ -59,7 +72,8 @@ def chain_to_gex(oi_df, spot, as_of=None):
 
 
 def ibkr_to_gex(oi_df, gamma_df, spot):
-    """Merge OI + IBKR greeks into a GEX DataFrame."""
+    # Merge stored OI with live IBKR greeks into a GEX DataFrame.
+    # Uses IBKR gamma directly instead of recomputing from IV.
     if gamma_df.empty:
         return pd.DataFrame(columns=['strike', 'expiry', 'gex'])
     df = oi_df.merge(gamma_df, on=['expiry', 'strike'], how='inner')
@@ -68,7 +82,8 @@ def ibkr_to_gex(oi_df, gamma_df, spot):
 
 
 def levels(gex_df, spot):
-    """(wall, supp, res, net) from any GEX DataFrame."""
+    # Aggregate GEX by strike and return (wall, support, resistance, net).
+    # Wall = highest absolute GEX; support/resistance = largest below/above spot.
     if gex_df.empty:
         return None, None, None, 0.0
     agg   = gex_df.groupby('strike')['gex'].sum().reset_index()
@@ -85,9 +100,8 @@ def levels(gex_df, spot):
 # ── IBKR greeks ───────────────────────────────────────────────────────────────
 
 def fetch_ibkr_greeks(ib, ticker, spot, oi_df, strikes_pct=0.08, batch=60, sleep_s=4):
-    """Request call modelGreeks for all (expiry, strike) pairs within ±strikes_pct of spot.
-    Gamma is identical for calls/puts (put-call parity) so we request calls only.
-    """
+    # Request modelGreeks for calls within ±strikes_pct of spot via IBKR.
+    # Gamma is identical for calls/puts (put-call parity), so calls-only saves half the requests.
     lo, hi = spot * (1 - strikes_pct), spot * (1 + strikes_pct)
     pairs  = (oi_df[(oi_df['strike'] >= lo) & (oi_df['strike'] <= hi)]
               [['expiry', 'strike']].drop_duplicates())
@@ -137,7 +151,8 @@ _MORNING_DDL = '''CREATE TABLE IF NOT EXISTS morning (
 
 
 def save_snapshot(db_path, table, date_, ticker, snap_time, spot, lvl_0, lvl_w):
-    """Write one GEX snapshot row. lvl_0 / lvl_w = (wall, supp, res, net)."""
+    # Upsert one GEX snapshot row into intraday or morning table.
+    # net GEX stored in billions (÷1e9) to keep the number human-readable.
     db_path = Path(db_path)
     db_path.parent.mkdir(parents=True, exist_ok=True)
     w0, s0, r0, n0 = lvl_0
@@ -153,7 +168,8 @@ def save_snapshot(db_path, table, date_, ticker, snap_time, spot, lvl_0, lvl_w):
 
 
 def load_snapshots(db_path, table, date_, ticker=None):
-    """Return all rows for date_ (optionally filtered by ticker) as list of dicts."""
+    # Return all snapshot rows for a date, optionally filtered by ticker.
+    # Returns [] if the DB or table doesn't exist yet (first run of the day).
     db_path = Path(db_path)
     if not db_path.exists():
         return []

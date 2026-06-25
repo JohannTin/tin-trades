@@ -2,6 +2,9 @@
 """
 Macro events calendar — high impact USD only.
 
+Input:  ForexFactory JSON feed (nfs.faireconomy.media)
+Output: data/events.db (SQLite); Telegram message; terminal table
+
 Usage:
     .venv/bin/python events.py          # this week
     .venv/bin/python events.py --next   # next week (used by Sunday cron)
@@ -31,6 +34,7 @@ log       = setup_logger('events', prefix='events')
 
 
 def get_db():
+    # Open (or create) events SQLite DB with WAL mode; creates table on first run.
     os.makedirs('data', exist_ok=True)
     conn = sqlite3.connect(EVENTS_DB)
     conn.execute('PRAGMA journal_mode=WAL')
@@ -55,6 +59,7 @@ def get_db():
 
 
 def save_events(rows, year, week):
+    # Upsert ForexFactory event rows keyed by (year, week, date, title).
     conn       = get_db()
     fetched_at = datetime.now().isoformat(timespec='seconds')
     conn.executemany(
@@ -70,6 +75,7 @@ def save_events(rows, year, week):
 
 
 def fetch_ff():
+    # GET ForexFactory this-week or next-week JSON; returns [] on any error.
     url = FF_NEXT if NEXT_WEEK else FF_THIS
     try:
         r = requests.get(url, headers=HEADERS, timeout=10)
@@ -81,10 +87,12 @@ def fetch_ff():
 
 
 def to_et(date_str):
+    # Parse an ISO datetime string and convert to Eastern Time.
     return datetime.fromisoformat(date_str).astimezone(ET)
 
 
 def already_ran(year, week):
+    # Check if any events rows already exist for year/week; used to skip duplicate runs.
     conn = get_db()
     row  = conn.execute('SELECT 1 FROM events WHERE year=? AND week=? LIMIT 1', (year, week)).fetchone()
     conn.close()
@@ -92,6 +100,7 @@ def already_ran(year, week):
 
 
 def run():
+    # Full pipeline: fetch ForexFactory, filter to high-impact USD, save to DB, print table, send Telegram.
     t0 = time.time()
 
     today = datetime.now(ET)
